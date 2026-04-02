@@ -1,9 +1,9 @@
 # Project Tracto
 
+### Prep
+
 > [!WARNING]
 > lib fork required for compilation.
-
-#### Prep
 
 1. Fork lib
 
@@ -33,7 +33,7 @@ func (e *Editor) GetScrollBounds() image.Rectangle {
 
 ```
 
-#### Windows Prep Build (CGO install):
+### Windows Prep Build (CGO install):
 
 ```
 Invoke-WebRequest -Uri "https://repo.msys2.org/distrib/x86_64/msys2-x86_64-20251213.exe" -OutFile "msys2-installer.exe"
@@ -43,11 +43,11 @@ $env:PATH += ";C:\msys64\mingw64\bin"
 $env:CGO_ENABLED="1"
 ```
 
-#### Linux Prep Build:
+### Linux Prep Build:
 
 Ensure you have CGO_ENABLED="1", install gcc if nesessary.
 
-#### Lauch:
+### Lauch:
 
 ```
 go run -mod=vendor ./...

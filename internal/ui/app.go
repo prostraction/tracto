@@ -475,6 +475,19 @@ func (ui *AppUI) layout(gtx layout.Context) layout.Dimensions {
 								}
 
 								return layout.Inset{Right: unit.Dp(4), Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									isFirstPass := gtx.Constraints.Min.X == 0
+									maxTabWidth := gtx.Dp(unit.Dp(200))
+
+									if isFirstPass && gtx.Constraints.Max.X > maxTabWidth {
+										gtx.Constraints.Max.X = maxTabWidth
+									}
+
+									tabHeight := twoLineHeight + gtx.Dp(unit.Dp(8))
+									closeBtnWidth := gtx.Dp(unit.Dp(28))
+
+									gtx.Constraints.Min.Y = tabHeight
+									gtx.Constraints.Max.Y = tabHeight
+
 									return widget.Border{
 										Color:        color.NRGBA{R: 169, G: 169, B: 169, A: 255},
 										CornerRadius: unit.Dp(2),
@@ -487,53 +500,36 @@ func (ui *AppUI) layout(gtx layout.Context) layout.Dimensions {
 												return layout.Dimensions{Size: gtx.Constraints.Min}
 											}),
 											layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-												closeBtnWidth := gtx.Dp(unit.Dp(28))
-												isFirstPass := gtx.Constraints.Min.X == 0
-
-												return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-													layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-														if isFirstPass {
-															maxTextWidth := gtx.Dp(unit.Dp(200)) - closeBtnWidth
-															if maxTextWidth < 0 {
-																maxTextWidth = 0
-															}
-															if gtx.Constraints.Max.X > maxTextWidth {
-																gtx.Constraints.Max.X = maxTextWidth
-															}
-														} else {
-															targetTextWidth := gtx.Constraints.Min.X - closeBtnWidth
-															if targetTextWidth < 0 {
-																targetTextWidth = 0
-															}
-															gtx.Constraints.Min.X = targetTextWidth
-															gtx.Constraints.Max.X = targetTextWidth
-														}
-
-														return material.Clickable(gtx, &tab.TabBtn, func(gtx layout.Context) layout.Dimensions {
-															d := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(8), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-																gtx.Constraints.Min.Y = twoLineHeight
-																gtx.Constraints.Max.Y = twoLineHeight
-																return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-																	layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-																		lbl := material.Label(ui.Theme, unit.Sp(12), formatTabTitle(tab.Title))
-																		lbl.Color = ui.Theme.Palette.Fg
-																		lbl.MaxLines = 2
-																		return lbl.Layout(gtx)
-																	}),
-																)
+												layoutText := func(gtx layout.Context) layout.Dimensions {
+													gtx.Constraints.Min.Y = tabHeight
+													gtx.Constraints.Max.Y = tabHeight
+													return material.Clickable(gtx, &tab.TabBtn, func(gtx layout.Context) layout.Dimensions {
+														return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+															return layout.Inset{Left: unit.Dp(8), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+																lbl := material.Label(ui.Theme, unit.Sp(12), formatTabTitle(tab.Title))
+																lbl.Color = ui.Theme.Palette.Fg
+																lbl.MaxLines = 2
+																return lbl.Layout(gtx)
 															})
-															if d.Size.X < gtx.Constraints.Min.X {
-																d.Size.X = gtx.Constraints.Min.X
-															}
-															return d
 														})
-													}),
+													})
+												}
+
+												var textChild layout.FlexChild
+												if isFirstPass {
+													textChild = layout.Rigid(layoutText)
+												} else {
+													textChild = layout.Flexed(1, layoutText)
+												}
+
+												return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+													textChild,
 													layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+														gtx.Constraints.Min.X = closeBtnWidth
+														gtx.Constraints.Max.X = closeBtnWidth
+														gtx.Constraints.Min.Y = tabHeight
+														gtx.Constraints.Max.Y = tabHeight
 														return material.Clickable(gtx, &tab.CloseBtn, func(gtx layout.Context) layout.Dimensions {
-															gtx.Constraints.Min.Y = twoLineHeight + gtx.Dp(unit.Dp(8))
-															gtx.Constraints.Max.Y = gtx.Constraints.Min.Y
-															gtx.Constraints.Min.X = closeBtnWidth
-															gtx.Constraints.Max.X = closeBtnWidth
 															return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 																size := gtx.Dp(unit.Dp(16))
 																gtx.Constraints.Min = image.Point{X: size, Y: size}
@@ -552,31 +548,27 @@ func (ui *AppUI) layout(gtx layout.Context) layout.Dimensions {
 
 						widgets = append(widgets, func(gtx layout.Context) layout.Dimensions {
 							return layout.Inset{Right: unit.Dp(4), Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								isFirstPass := gtx.Constraints.Min.X == 0
+								if isFirstPass {
+									gtx.Constraints.Min.X = gtx.Dp(unit.Dp(36))
+								}
+								tabHeight := twoLineHeight + gtx.Dp(unit.Dp(8))
+								gtx.Constraints.Min.Y = tabHeight
+								gtx.Constraints.Max.Y = tabHeight
+								gtx.Constraints.Max.X = gtx.Constraints.Min.X
+
 								return widget.Border{
 									Color:        color.NRGBA{R: 169, G: 169, B: 169, A: 255},
 									CornerRadius: unit.Dp(2),
 									Width:        unit.Dp(1),
 								}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									return layout.Stack{}.Layout(gtx,
-										layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-											rect := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 2)
-											paint.FillShape(gtx.Ops, color.NRGBA{R: 33, G: 33, B: 33, A: 255}, rect.Op(gtx.Ops))
-											return layout.Dimensions{Size: gtx.Constraints.Min}
-										}),
-										layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-											return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-												gtx.Constraints.Min.Y = twoLineHeight
-												gtx.Constraints.Max.Y = twoLineHeight
-												return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-													btn := material.Button(ui.Theme, &ui.AddTabBtn, "+")
-													btn.Background = color.NRGBA{}
-													btn.Color = ui.Theme.Palette.Fg
-													btn.Inset = layout.Inset{}
-													return btn.Layout(gtx)
-												})
-											})
-										}),
-									)
+									btn := material.Button(ui.Theme, &ui.AddTabBtn, "+")
+									btn.Background = color.NRGBA{R: 33, G: 33, B: 33, A: 255}
+									btn.Color = ui.Theme.Palette.Fg
+									btn.TextSize = unit.Sp(16)
+									btn.CornerRadius = unit.Dp(2)
+									btn.Inset = layout.Inset{}
+									return btn.Layout(gtx)
 								})
 							})
 						})
