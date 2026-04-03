@@ -118,26 +118,28 @@ func processTemplate(input string, env map[string]string) string {
 }
 
 func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, env map[string]string) layout.Dimensions {
-	p := gtx.Dp(unit.Dp(4))
+	pX := gtx.Dp(unit.Dp(4))
+	pY := gtx.Dp(unit.Dp(6))
+
 	availWidth := gtx.Constraints.Max.X
 	if availWidth <= 0 {
 		return layout.Dimensions{}
 	}
 
 	edGtx := gtx
-	edGtx.Constraints.Min.X = availWidth - (p * 2)
+	edGtx.Constraints.Min.X = availWidth - (pX * 2)
 	if edGtx.Constraints.Min.X < 0 {
 		edGtx.Constraints.Min.X = 0
 	}
 	edGtx.Constraints.Max.X = edGtx.Constraints.Min.X
 
-	edGtx.Constraints.Min.Y = gtx.Constraints.Min.Y - (p * 2)
+	edGtx.Constraints.Min.Y = gtx.Constraints.Min.Y - (pY * 2)
 	if edGtx.Constraints.Min.Y < 0 {
 		edGtx.Constraints.Min.Y = 0
 	}
 
 	macro := op.Record(gtx.Ops)
-	op.Offset(image.Point{X: p, Y: p}).Add(gtx.Ops)
+	op.Offset(image.Point{X: pX, Y: pY}).Add(gtx.Ops)
 
 	th.Shaper.LayoutString(text.Parameters{
 		PxPerEm:  fixed.I(gtx.Sp(unit.Sp(12))),
@@ -180,16 +182,16 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 		pWidth := measureTextWidth(gtx, th, unit.Sp(12), prefix)
 		vWidth := measureTextWidth(gtx, th, unit.Sp(12), varText)
 
-		bgColor := color.NRGBA{R: 200, G: 50, B: 50, A: 255}
+		bgColor := color.NRGBA{R: 130, G: 60, B: 80, A: 255}
 		if _, ok := env[varName]; ok {
-			bgColor = color.NRGBA{R: 50, G: 100, B: 200, A: 255}
+			bgColor = color.NRGBA{R: 45, G: 80, B: 140, A: 255}
 		}
 
 		x1 := pWidth - scrollX
 		x2 := x1 + vWidth
 
 		if x2 > 0 && x1 < edGtx.Constraints.Max.X {
-			rect := image.Rect(x1, 0, x2, lineHeight)
+			rect := image.Rect(x1, -1, x2, lineHeight+1)
 			paint.FillShape(gtx.Ops, bgColor, clip.UniformRRect(rect, 2).Op(gtx.Ops))
 		}
 
@@ -204,7 +206,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	call := macro.Stop()
 
 	finalWidth := availWidth
-	finalHeight := dims.Size.Y + (p * 2)
+	finalHeight := dims.Size.Y + (pY * 2)
 	if finalHeight < gtx.Constraints.Min.Y {
 		finalHeight = gtx.Constraints.Min.Y
 	}
@@ -231,7 +233,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	}
 
 	call.Add(gtx.Ops)
-	return layout.Dimensions{Size: finalSize, Baseline: dims.Baseline + p}
+	return layout.Dimensions{Size: finalSize, Baseline: dims.Baseline + pY}
 }
 
 func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool) layout.Dimensions {
@@ -446,7 +448,9 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 								if !t.MethodListOpen {
 									return layout.Dimensions{}
 								}
-								return layout.Inset{Top: unit.Dp(36)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+
+								macro := op.Record(gtx.Ops)
+								layout.Inset{Top: unit.Dp(36)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 									return widget.Border{
 										Color:        color.NRGBA{R: 169, G: 169, B: 169, A: 255},
 										CornerRadius: unit.Dp(2),
@@ -476,9 +480,15 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 										)
 									})
 								})
+								op.Defer(gtx.Ops, macro.Stop())
+
+								return layout.Dimensions{}
 							}),
 							layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-								return material.Button(th, &t.MethodBtn, t.Method).Layout(gtx)
+								btn := material.Button(th, &t.MethodBtn, t.Method)
+								btn.TextSize = unit.Sp(12)
+								btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(8), Right: unit.Dp(8)}
+								return btn.Layout(gtx)
 							}),
 						)
 					}),
@@ -488,7 +498,10 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return material.Button(th, &t.SendBtn, "SEND").Layout(gtx)
+						btn := material.Button(th, &t.SendBtn, "SEND")
+						btn.TextSize = unit.Sp(12)
+						btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}
+						return btn.Layout(gtx)
 					}),
 				)
 			})

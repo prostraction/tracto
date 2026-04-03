@@ -479,13 +479,14 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 				})
 			}
 
-			return material.List(ui.Theme, &ui.ColList).Layout(gtx, len(ui.VisibleCols), func(gtx layout.Context, i int) layout.Dimensions {
+			var updateCols bool
+			dim := material.List(ui.Theme, &ui.ColList).Layout(gtx, len(ui.VisibleCols), func(gtx layout.Context, i int) layout.Dimensions {
 				node := ui.VisibleCols[i]
 
 				for node.Click.Clicked(gtx) {
 					if node.IsFolder {
 						node.Expanded = !node.Expanded
-						ui.updateVisibleCols()
+						updateCols = true
 					} else if node.Request != nil {
 						ui.openRequestInTab(*node.Request)
 					}
@@ -504,7 +505,7 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 								if node.Expanded {
 									txt = "▼ " + txt
 								} else {
-									txt = "▶ " + txt
+									txt = "► " + txt
 								}
 							} else if node.Request != nil {
 								txt = node.Request.Method + "  " + txt
@@ -520,6 +521,12 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 					})
 				})
 			})
+
+			if updateCols {
+				ui.updateVisibleCols()
+			}
+
+			return dim
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			size := image.Point{X: gtx.Constraints.Max.X, Y: gtx.Dp(unit.Dp(6))}
@@ -736,11 +743,15 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 		layout.Flexed(1-ui.SidebarRatio, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{
+						Top:    unit.Dp(8),
+						Bottom: unit.Dp(8),
+						Left:   unit.Dp(4),
+						Right:  unit.Dp(4),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						tabHeight := gtx.Dp(unit.Dp(34))
 						closeBtnWidth := gtx.Dp(unit.Dp(28))
 						addBtnW := gtx.Dp(unit.Dp(36))
-						// Увеличили отступ до 16dp, чтобы исключить любое усечение на краю
 						maxWidth := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(16))
 
 						type TabInfo struct {
@@ -891,7 +902,6 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 													}),
 												)
 											}),
-											// Идеальная ручная отрисовка 1px рамки
 											layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 												borderColor := color.NRGBA{R: 169, G: 169, B: 169, A: 255}
 												maxX := gtx.Constraints.Min.X
@@ -901,15 +911,12 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 													t = gtx.Dp(1)
 												}
 
-												// Низ и право рисуются всегда
 												paint.FillShape(gtx.Ops, borderColor, clip.Rect{Min: image.Pt(0, maxY-t), Max: image.Pt(maxX, maxY)}.Op())
 												paint.FillShape(gtx.Ops, borderColor, clip.Rect{Min: image.Pt(maxX-t, 0), Max: image.Pt(maxX, maxY)}.Op())
 
-												// Верх только для первого ряда
 												if rIdx == 0 {
 													paint.FillShape(gtx.Ops, borderColor, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(maxX, t)}.Op())
 												}
-												// Лево только для первой вкладки в ряду
 												if j == 0 {
 													paint.FillShape(gtx.Ops, borderColor, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(t, maxY)}.Op())
 												}
