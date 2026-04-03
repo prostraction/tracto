@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"gioui.org/widget"
+	"github.com/uorg-saver/gio/widget"
 )
 
 type ExtCollection struct {

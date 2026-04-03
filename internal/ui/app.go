@@ -6,20 +6,24 @@ import (
 	"image/color"
 	"io"
 	"strings"
+	"time"
 
-	"gioui.org/app"
-	"gioui.org/font"
-	"gioui.org/gesture"
-	"gioui.org/io/pointer"
-	"gioui.org/layout"
-	"gioui.org/op"
-	"gioui.org/op/clip"
-	"gioui.org/op/paint"
-	"gioui.org/text"
-	"gioui.org/unit"
-	"gioui.org/widget"
-	"gioui.org/widget/material"
-	"gioui.org/x/explorer"
+	"github.com/uorg-saver/gio-x/explorer"
+	"github.com/uorg-saver/gio/app"
+	"github.com/uorg-saver/gio/f32"
+	"github.com/uorg-saver/gio/font"
+	"github.com/uorg-saver/gio/gesture"
+	"github.com/uorg-saver/gio/io/event"
+	"github.com/uorg-saver/gio/io/pointer"
+	"github.com/uorg-saver/gio/io/system"
+	"github.com/uorg-saver/gio/layout"
+	"github.com/uorg-saver/gio/op"
+	"github.com/uorg-saver/gio/op/clip"
+	"github.com/uorg-saver/gio/op/paint"
+	"github.com/uorg-saver/gio/text"
+	"github.com/uorg-saver/gio/unit"
+	"github.com/uorg-saver/gio/widget"
+	"github.com/uorg-saver/gio/widget/material"
 	"golang.org/x/exp/shiny/materialdesign/icons"
 	"golang.org/x/image/math/fixed"
 )
@@ -33,6 +37,12 @@ func init() {
 type AppUI struct {
 	Theme           *material.Theme
 	Window          *app.Window
+	BtnMinimize     widget.Clickable
+	BtnMaximize     widget.Clickable
+	BtnClose        widget.Clickable
+	IsMaximized     bool
+	TitleTag        bool
+	LastTitleClick  time.Time
 	Explorer        *explorer.Explorer
 	Tabs            []*RequestTab
 	ActiveIdx       int
@@ -116,9 +126,12 @@ func NewAppUI() *AppUI {
 	th.Palette.ContrastFg = color.NRGBA{R: 227, G: 227, B: 227, A: 255}
 	th.TextSize = unit.Sp(14)
 
+	win := new(app.Window)
+	win.Option(app.Decorated(false))
+
 	ui := &AppUI{
 		Theme:           th,
-		Window:          new(app.Window),
+		Window:          win,
 		SidebarRatio:    0.2,
 		SidebarEnvRatio: 0.6,
 		ColLoadedChan:   make(chan *CollectionUI, 5),
@@ -158,6 +171,8 @@ func (ui *AppUI) Run() error {
 		case app.DestroyEvent:
 			ui.saveState()
 			return e.Err
+		case app.ConfigEvent:
+			ui.IsMaximized = e.Config.Mode == app.Maximized || e.Config.Mode == app.Fullscreen
 		case app.FrameEvent:
 			for {
 				select {
@@ -174,7 +189,7 @@ func (ui *AppUI) Run() error {
 			}
 		Render:
 			gtx := app.NewContext(&ops, e)
-			ui.layout(gtx)
+			ui.layoutApp(gtx)
 			e.Frame(gtx.Ops)
 		}
 	}
@@ -256,6 +271,163 @@ func (ui *AppUI) openRequestInTab(req ParsedRequest) {
 	ui.Tabs = append(ui.Tabs, tab)
 	ui.ActiveIdx = len(ui.Tabs) - 1
 	ui.saveState()
+}
+
+func (ui *AppUI) layoutTitleBtn(gtx layout.Context, btn *widget.Clickable, kind int) layout.Dimensions {
+	btnSize := image.Point{X: gtx.Dp(unit.Dp(46)), Y: gtx.Dp(unit.Dp(30))}
+	gtx.Constraints.Min = btnSize
+	gtx.Constraints.Max = btnSize
+
+	return btn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		bg := color.NRGBA{R: 20, G: 20, B: 20, A: 255}
+		fg := ui.Theme.Palette.Fg
+
+		if btn.Hovered() {
+			bg = color.NRGBA{R: 60, G: 60, B: 60, A: 255}
+			if kind == 3 {
+				bg = color.NRGBA{R: 200, G: 50, B: 50, A: 255}
+				fg = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+			}
+		}
+
+		paint.FillShape(gtx.Ops, bg, clip.Rect{Max: btnSize}.Op())
+
+		cx := float32(int(float32(btnSize.X)/2)) + 0.5
+		cy := float32(int(float32(btnSize.Y)/2)) + 0.5
+
+		rectPath := func(ops *op.Ops, x, y, s float32) clip.PathSpec {
+			var p clip.Path
+			p.Begin(ops)
+			p.MoveTo(f32.Pt(x, y))
+			p.LineTo(f32.Pt(x+s, y))
+			p.LineTo(f32.Pt(x+s, y+s))
+			p.LineTo(f32.Pt(x, y+s))
+			p.Close()
+			return p.End()
+		}
+
+		switch kind {
+		case 0:
+			var p clip.Path
+			p.Begin(gtx.Ops)
+			p.MoveTo(f32.Pt(cx-5, cy))
+			p.LineTo(f32.Pt(cx+5, cy))
+			paint.FillShape(gtx.Ops, fg, clip.Stroke{Path: p.End(), Width: 1}.Op())
+		case 1:
+			s := float32(8)
+			x := cx - 4
+			y := cy - 4
+			paint.FillShape(gtx.Ops, fg, clip.Stroke{Path: rectPath(gtx.Ops, x, y, s), Width: 1}.Op())
+		case 2:
+			s := float32(7)
+			paint.FillShape(gtx.Ops, fg, clip.Stroke{Path: rectPath(gtx.Ops, cx-1, cy-4, s), Width: 1}.Op())
+			paint.FillShape(gtx.Ops, bg, clip.Rect{
+				Min: image.Pt(int(cx-4)-1, int(cy-1)-1),
+				Max: image.Pt(int(cx-4+s)+2, int(cy-1+s)+2),
+			}.Op())
+			paint.FillShape(gtx.Ops, fg, clip.Stroke{Path: rectPath(gtx.Ops, cx-4, cy-1, s), Width: 1}.Op())
+		case 3:
+			s := float32(10)
+			x := cx - 5
+			y := cy - 5
+			var p clip.Path
+			p.Begin(gtx.Ops)
+			p.MoveTo(f32.Pt(x, y))
+			p.LineTo(f32.Pt(x+s, y+s))
+			p.MoveTo(f32.Pt(x+s, y))
+			p.LineTo(f32.Pt(x, y+s))
+			paint.FillShape(gtx.Ops, fg, clip.Stroke{Path: p.End(), Width: 1}.Op())
+		}
+
+		return layout.Dimensions{Size: btnSize}
+	})
+}
+
+func (ui *AppUI) layoutTitleBar(gtx layout.Context) layout.Dimensions {
+	height := gtx.Dp(unit.Dp(30))
+	gtx.Constraints.Min.Y = height
+	gtx.Constraints.Max.Y = height
+
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 20, G: 20, B: 20, A: 255}, clip.Rect{Max: image.Point{X: gtx.Constraints.Max.X, Y: height}}.Op())
+
+	if ui.BtnClose.Clicked(gtx) {
+		ui.Window.Perform(system.ActionClose)
+	}
+	if ui.BtnMinimize.Clicked(gtx) {
+		ui.Window.Perform(system.ActionMinimize)
+	}
+	if ui.BtnMaximize.Clicked(gtx) {
+		if ui.IsMaximized {
+			ui.Window.Perform(system.ActionUnmaximize)
+			ui.IsMaximized = false
+		} else {
+			ui.Window.Perform(system.ActionMaximize)
+			ui.IsMaximized = true
+		}
+	}
+
+	layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			size := gtx.Constraints.Max
+
+			for {
+				ev, ok := gtx.Event(pointer.Filter{
+					Target: &ui.TitleTag,
+					Kinds:  pointer.Press,
+				})
+				if !ok {
+					break
+				}
+				if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press && e.Buttons == pointer.ButtonPrimary {
+					now := time.Now()
+					if now.Sub(ui.LastTitleClick) < 300*time.Millisecond {
+						if ui.IsMaximized {
+							ui.Window.Perform(system.ActionUnmaximize)
+							ui.IsMaximized = false
+						} else {
+							ui.Window.Perform(system.ActionMaximize)
+							ui.IsMaximized = true
+						}
+						ui.LastTitleClick = time.Time{}
+					} else {
+						ui.Window.Perform(system.ActionMove)
+						ui.LastTitleClick = now
+					}
+				}
+			}
+
+			area := clip.Rect{Max: size}.Push(gtx.Ops)
+			event.Op(gtx.Ops, &ui.TitleTag)
+			area.Pop()
+
+			gtx.Constraints.Min = size
+
+			return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				gtx.Constraints.Min = image.Point{}
+				return layout.Inset{Left: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Label(ui.Theme, unit.Sp(14), "Tracto")
+					lbl.MaxLines = 1
+					lbl.Color = color.NRGBA{R: 180, G: 180, B: 180, A: 255}
+					return lbl.Layout(gtx)
+				})
+			})
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutTitleBtn(gtx, &ui.BtnMinimize, 0)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			kind := 1
+			if ui.IsMaximized {
+				kind = 2
+			}
+			return ui.layoutTitleBtn(gtx, &ui.BtnMaximize, kind)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutTitleBtn(gtx, &ui.BtnClose, 3)
+		}),
+	)
+
+	return layout.Dimensions{Size: image.Point{X: gtx.Constraints.Max.X, Y: height}}
 }
 
 func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
@@ -465,7 +637,18 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 	)
 }
 
-func (ui *AppUI) layout(gtx layout.Context) layout.Dimensions {
+func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutTitleBar(gtx)
+		}),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutContent(gtx)
+		}),
+	)
+}
+
+func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 	for ui.AddTabBtn.Clicked(gtx) {
 		newTab := NewRequestTab("New request")
 		ui.Tabs = append(ui.Tabs, newTab)
@@ -492,7 +675,7 @@ func (ui *AppUI) layout(gtx layout.Context) layout.Dimensions {
 		ui.ActiveIdx = 0
 	}
 
-	paint.Fill(gtx.Ops, ui.Theme.Palette.Bg)
+	paint.FillShape(gtx.Ops, ui.Theme.Palette.Bg, clip.Rect{Max: gtx.Constraints.Max}.Op())
 
 	var activeEnvVars map[string]string
 	for _, e := range ui.Environments {
@@ -502,7 +685,7 @@ func (ui *AppUI) layout(gtx layout.Context) layout.Dimensions {
 		}
 	}
 
-	dims := layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 		layout.Flexed(ui.SidebarRatio, func(gtx layout.Context) layout.Dimensions {
 			return ui.layoutSidebar(gtx)
 		}),
@@ -765,5 +948,4 @@ func (ui *AppUI) layout(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 	)
-	return dims
 }

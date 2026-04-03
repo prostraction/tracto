@@ -6,7 +6,7 @@ import (
 
 	"tracto/internal/ui"
 
-	"gioui.org/app"
+	"github.com/uorg-saver/gio/app"
 )
 
 func main() {
