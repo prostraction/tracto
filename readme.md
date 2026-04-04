@@ -23,3 +23,11 @@ Ensure you have CGO_ENABLED="1", install gcc if nesessary.
 ```
 go run ./...
 ```
+
+### Build
+
+Windows
+
+```
+go build -ldflags="-s -w -H=windowsgui" -o bin\tracto.exe cmd\main.go && upx --best --lzma bin\tracto.exe
+```

@@ -3,5 +3,7 @@
 .vscode
 *.json
 *.ps1
-*.exe
+main.exe
+msys2-installer.exe
+upx.exe
 vendor

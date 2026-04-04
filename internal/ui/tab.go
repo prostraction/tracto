@@ -28,7 +28,26 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
-var methods = []string{"GET", "POST", "PUT", "DELETE", "PATCH"}
+var methods = []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}
+
+func getMethodColor(method string) color.NRGBA {
+	switch method {
+	case "GET":
+		return color.NRGBA{R: 12, G: 187, B: 82, A: 255}
+	case "POST":
+		return color.NRGBA{R: 255, G: 180, B: 0, A: 255}
+	case "PUT":
+		return color.NRGBA{R: 9, G: 123, B: 237, A: 255}
+	case "DELETE":
+		return color.NRGBA{R: 235, G: 32, B: 19, A: 255}
+	case "PATCH":
+		return color.NRGBA{R: 186, G: 85, B: 211, A: 255}
+	case "OPTIONS":
+		return color.NRGBA{R: 13, G: 184, B: 214, A: 255}
+	default:
+		return color.NRGBA{R: 150, G: 150, B: 150, A: 255}
+	}
+}
 
 var (
 	iconCopy *widget.Icon
@@ -479,7 +498,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 													children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 														btn := material.Button(th, &t.MethodClickables[idx], methodName)
 														btn.Background = color.NRGBA{}
-														btn.Color = th.Palette.Fg
+														btn.Color = getMethodColor(methodName)
 														btn.Inset = layout.UniformInset(unit.Dp(8))
 														return btn.Layout(gtx)
 													}))
@@ -496,6 +515,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 							layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 								btn := material.Button(th, &t.MethodBtn, t.Method)
 								btn.Background = color.NRGBA{R: 49, G: 49, B: 49, A: 255}
+								btn.Color = getMethodColor(t.Method)
 								btn.TextSize = unit.Sp(12)
 								btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(8), Right: unit.Dp(8)}
 								return btn.Layout(gtx)

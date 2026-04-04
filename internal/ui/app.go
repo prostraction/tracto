@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	_ "embed"
 	"image"
 	"image/color"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"github.com/nanorele/gio/app"
 	"github.com/nanorele/gio/f32"
 	"github.com/nanorele/gio/font"
+	"github.com/nanorele/gio/font/gofont"
+	"github.com/nanorele/gio/font/opentype"
 	"github.com/nanorele/gio/gesture"
 	"github.com/nanorele/gio/io/event"
 	"github.com/nanorele/gio/io/pointer"
@@ -142,8 +145,24 @@ func measureTabWidth(gtx layout.Context, th *material.Theme, title string) int {
 	return totalW
 }
 
+//go:embed assets/fonts/NotoColorEmoji.ttf
+var notoColorEmojiBytes []byte
+
 func NewAppUI() *AppUI {
 	th := material.NewTheme()
+
+	fonts := gofont.Collection()
+
+	emojiFace, err := opentype.Parse(notoColorEmojiBytes)
+	if err == nil {
+		fonts = append(fonts, font.FontFace{
+			Font: font.Font{Typeface: "EmojiFallback"},
+			Face: emojiFace,
+		})
+	}
+
+	th.Shaper = text.NewShaper(text.WithCollection(fonts))
+
 	th.Palette.Bg = color.NRGBA{R: 31, G: 31, B: 31, A: 255}
 	th.Palette.Fg = color.NRGBA{R: 204, G: 204, B: 204, A: 255}
 	th.Palette.ContrastBg = color.NRGBA{R: 14, G: 99, B: 156, A: 255}
@@ -467,8 +486,8 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 	gtx.Constraints.Min = size
 
 	totalAvailableHeight := float32(gtx.Constraints.Max.Y)
-	flexHeight := totalAvailableHeight - float32(gtx.Dp(unit.Dp(100)))
-	minEnvListHeight := float32(gtx.Dp(unit.Dp(100)))
+	flexHeight := totalAvailableHeight - float32(gtx.Dp(unit.Dp(6)))
+	minEnvListHeight := float32(gtx.Dp(unit.Dp(110)))
 	maxRatio := float32(0.9)
 
 	if flexHeight > 0 {
@@ -554,26 +573,41 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 							return material.Clickable(gtx, &node.Click, func(gtx layout.Context) layout.Dimensions {
 								return layout.Inset{
 									Top: unit.Dp(4), Bottom: unit.Dp(4),
-									Left:  unit.Dp(float32(4 + node.Depth*12)),
+									Left:  unit.Dp(float32(node.Depth * 12)),
 									Right: unit.Dp(4),
 								}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									txt := node.Name
+									var children []layout.FlexChild
+
 									if node.IsFolder {
+										txt := node.Name
 										if node.Expanded {
 											txt = "▼ " + txt
 										} else {
 											txt = "► " + txt
 										}
+										children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Label(ui.Theme, unit.Sp(12), txt)
+											lbl.Alignment = text.Start
+											if node.Depth == 0 {
+												lbl.Font.Weight = font.Bold
+											}
+											return layout.W.Layout(gtx, lbl.Layout)
+										}))
 									} else if node.Request != nil {
-										txt = node.Request.Method + "  " + txt
+										children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Label(ui.Theme, unit.Sp(10), node.Request.Method)
+											lbl.Color = getMethodColor(node.Request.Method)
+											return lbl.Layout(gtx)
+										}))
+										children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout))
+										children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Label(ui.Theme, unit.Sp(12), node.Name)
+											lbl.Alignment = text.Start
+											return layout.W.Layout(gtx, lbl.Layout)
+										}))
 									}
 
-									lbl := material.Label(ui.Theme, unit.Sp(12), txt)
-									lbl.Alignment = text.Start
-									if node.Depth == 0 {
-										lbl.Font.Weight = font.Bold
-									}
-									return layout.W.Layout(gtx, lbl.Layout)
+									return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, children...)
 								})
 							})
 						})
@@ -612,7 +646,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 
 			if moved && flexHeight > 0 {
 				delta := finalY - ui.SidebarEnvDragY
-				oldRatio := ui.SidebarEnvRatio
 				ui.SidebarEnvRatio += delta / flexHeight
 
 				if ui.SidebarEnvRatio < 0.1 {
@@ -621,7 +654,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 					ui.SidebarEnvRatio = maxRatio
 				}
 
-				ui.SidebarEnvDragY = finalY - ((ui.SidebarEnvRatio - oldRatio) * flexHeight)
 				ui.Window.Invalidate()
 			}
 
@@ -1048,7 +1080,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 				}
 			}
 
-			flexWidth := float32(gtx.Constraints.Max.X)
+			flexWidth := float32(gtx.Constraints.Max.X - gtx.Dp(unit.Dp(4)))
 			var minSidebarRatio float32
 			if flexWidth > 0 {
 				minSidebarRatio = float32(gtx.Dp(unit.Dp(200))) / flexWidth
@@ -1056,7 +1088,6 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 
 			if moved && flexWidth > 0 {
 				delta := finalX - ui.SidebarDragX
-				oldRatio := ui.SidebarRatio
 				ui.SidebarRatio += delta / flexWidth
 
 				if ui.SidebarRatio < minSidebarRatio {
@@ -1065,7 +1096,6 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 					ui.SidebarRatio = 0.5
 				}
 
-				ui.SidebarDragX = finalX - ((ui.SidebarRatio - oldRatio) * flexWidth)
 				ui.Window.Invalidate()
 			}
 
