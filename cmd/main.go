@@ -6,7 +6,7 @@ import (
 
 	"tracto/internal/ui"
 
-	"github.com/uorg-saver/gio/app"
+	"github.com/nanorele/gio/app"
 )
 
 func main() {

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"io"
 
-	"github.com/uorg-saver/gio/widget"
+	"github.com/nanorele/gio/widget"
 )
 
 type ExtEnvironment struct {

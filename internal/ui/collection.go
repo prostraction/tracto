@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/uorg-saver/gio/widget"
+	"github.com/nanorele/gio/widget"
 )
 
 type ExtCollection struct {

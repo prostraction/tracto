@@ -9,22 +9,22 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/uorg-saver/gio-x/explorer"
-	"github.com/uorg-saver/gio/app"
-	"github.com/uorg-saver/gio/f32"
-	"github.com/uorg-saver/gio/font"
-	"github.com/uorg-saver/gio/gesture"
-	"github.com/uorg-saver/gio/io/event"
-	"github.com/uorg-saver/gio/io/pointer"
-	"github.com/uorg-saver/gio/io/system"
-	"github.com/uorg-saver/gio/layout"
-	"github.com/uorg-saver/gio/op"
-	"github.com/uorg-saver/gio/op/clip"
-	"github.com/uorg-saver/gio/op/paint"
-	"github.com/uorg-saver/gio/text"
-	"github.com/uorg-saver/gio/unit"
-	"github.com/uorg-saver/gio/widget"
-	"github.com/uorg-saver/gio/widget/material"
+	"github.com/nanorele/gio-x/explorer"
+	"github.com/nanorele/gio/app"
+	"github.com/nanorele/gio/f32"
+	"github.com/nanorele/gio/font"
+	"github.com/nanorele/gio/gesture"
+	"github.com/nanorele/gio/io/event"
+	"github.com/nanorele/gio/io/pointer"
+	"github.com/nanorele/gio/io/system"
+	"github.com/nanorele/gio/layout"
+	"github.com/nanorele/gio/op"
+	"github.com/nanorele/gio/op/clip"
+	"github.com/nanorele/gio/op/paint"
+	"github.com/nanorele/gio/text"
+	"github.com/nanorele/gio/unit"
+	"github.com/nanorele/gio/widget"
+	"github.com/nanorele/gio/widget/material"
 	"golang.org/x/exp/shiny/materialdesign/icons"
 	"golang.org/x/image/math/fixed"
 )
@@ -133,7 +133,7 @@ func measureTabWidth(gtx layout.Context, th *material.Theme, title string) int {
 		}
 	}
 
-	totalW := maxW + gtx.Dp(unit.Dp(48))
+	totalW := maxW + gtx.Dp(unit.Dp(52))
 	maxWidthLimit := gtx.Dp(unit.Dp(200))
 
 	if totalW > maxWidthLimit {
@@ -1088,7 +1088,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 						Left:   unit.Dp(4),
 						Right:  unit.Dp(4),
 					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						tabHeight := gtx.Dp(unit.Dp(34))
+						tabHeight := gtx.Dp(unit.Dp(36))
 						closeBtnWidth := gtx.Dp(unit.Dp(28))
 						addBtnW := gtx.Dp(unit.Dp(36))
 						maxWidth := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(16))
@@ -1216,7 +1216,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 														return material.Clickable(gtx, &tab.TabBtn, func(gtx layout.Context) layout.Dimensions {
 															gtx.Constraints.Min = gtx.Constraints.Max
 															return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-																return layout.Inset{Left: unit.Dp(8), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+																return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(10), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 																	cleanTitle := sanitizeText(tab.Title)
 																	cleanTitle = strings.ReplaceAll(cleanTitle, "\n", " ")
 																	if strings.TrimSpace(cleanTitle) == "" {
