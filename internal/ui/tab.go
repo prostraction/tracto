@@ -276,7 +276,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	return layout.Dimensions{Size: finalSize, Baseline: dims.Baseline + pY}
 }
 
-func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, frozenWidth int) layout.Dimensions {
+func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, frozenWidth int, textSize unit.Sp) layout.Dimensions {
 	p := gtx.Dp(unit.Dp(4))
 
 	availWidth := gtx.Constraints.Max.X
@@ -304,7 +304,7 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 	macro := op.Record(gtx.Ops)
 	op.Offset(image.Point{X: p, Y: p}).Add(gtx.Ops)
 	e := material.Editor(th, ed, hint)
-	e.TextSize = unit.Sp(12)
+	e.TextSize = textSize
 	dims := e.Layout(edGtx)
 	call := macro.Stop()
 
@@ -694,11 +694,11 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 														return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 															return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 																layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-																	return TextField(gtx, th, &h.Key, "Header Key", false, 0)
+																	return TextField(gtx, th, &h.Key, "Header Key", false, 0, unit.Sp(12))
 																}),
 																layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
 																layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-																	return TextField(gtx, th, &h.Value, "Header Value", false, 0)
+																	return TextField(gtx, th, &h.Value, "Header Value", false, 0, unit.Sp(12))
 																}),
 																layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
 																layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -738,7 +738,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 											} else {
 												t.LastReqWidth = gtx.Constraints.Max.X
 											}
-											return TextField(gtx, th, &t.ReqEditor, "Request Body", false, frozenReqWidth)
+											return TextField(gtx, th, &t.ReqEditor, "Request Body", false, frozenReqWidth, unit.Sp(13))
 										})
 									}),
 								)
@@ -801,7 +801,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 															edGtx.Constraints.Min.Y = gtx.Constraints.Max.Y
 															edGtx.Constraints.Max.Y = gtx.Constraints.Max.Y
 															ed := material.Editor(th, &t.RespEditor, "")
-															ed.TextSize = unit.Sp(12)
+															ed.TextSize = unit.Sp(13)
 															return ed.Layout(edGtx)
 														})
 													} else {
@@ -813,7 +813,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 															t.LastRespWidth = gtx.Constraints.Max.X
 														}
 														ed := material.Editor(th, &t.RespEditor, "")
-														ed.TextSize = unit.Sp(12)
+														ed.TextSize = unit.Sp(13)
 														ed.Layout(edGtx)
 
 														cl := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
@@ -915,7 +915,6 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 		}),
 	)
 }
-
 func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
 	urlRaw := strings.ReplaceAll(t.URLInput.Text(), "\n", "")
 	urlRaw = strings.TrimSpace(utils.SanitizeText(urlRaw))

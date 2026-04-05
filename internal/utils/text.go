@@ -10,9 +10,10 @@ func SanitizeText(s string) string {
 	s = strings.ReplaceAll(s, "\r", "\n")
 	s = strings.ReplaceAll(s, "\u2028", "\n")
 	s = strings.ReplaceAll(s, "\u2029", "\n")
+	s = strings.ReplaceAll(s, "\t", "    ")
 
 	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' {
+		if r == '\n' {
 			return r
 		}
 		if unicode.IsSpace(r) {

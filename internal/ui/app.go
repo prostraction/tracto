@@ -153,7 +153,7 @@ func NewAppUI() *AppUI {
 	emojiFace, err := opentype.Parse(notoColorEmojiBytes)
 	if err == nil {
 		fonts = append(fonts, font.FontFace{
-			Font: font.Font{Typeface: "EmojiFallback"},
+			Font: font.Font{},
 			Face: emojiFace,
 		})
 	}
@@ -896,7 +896,7 @@ func (ui *AppUI) layoutEnvEditor(gtx layout.Context) layout.Dimensions {
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return TextField(gtx, ui.Theme, &env.NameEditor, "Environment Name", true, 0)
+						return TextField(gtx, ui.Theme, &env.NameEditor, "Environment Name", true, 0, unit.Sp(12))
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -966,11 +966,11 @@ func (ui *AppUI) layoutEnvEditor(gtx layout.Context) layout.Dimensions {
 								return material.CheckBox(ui.Theme, &r.Enabled, "").Layout(gtx)
 							}),
 							layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-								return TextField(gtx, ui.Theme, &r.KeyEditor, "Key", true, 0)
+								return TextField(gtx, ui.Theme, &r.KeyEditor, "Key", true, 0, unit.Sp(12))
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 							layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-								return TextField(gtx, ui.Theme, &r.ValEditor, "Value", true, 0)
+								return TextField(gtx, ui.Theme, &r.ValEditor, "Value", true, 0, unit.Sp(12))
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
