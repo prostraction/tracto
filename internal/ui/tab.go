@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"tracto/internal/utils"
 
 	"github.com/nanorele/gio/app"
 	"github.com/nanorele/gio/font"
@@ -885,7 +886,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 
 func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
 	urlRaw := strings.ReplaceAll(t.URLInput.Text(), "\n", "")
-	urlRaw = strings.TrimSpace(sanitizeText(urlRaw))
+	urlRaw = strings.TrimSpace(utils.SanitizeText(urlRaw))
 	url := processTemplate(urlRaw, env)
 
 	if url == "" {
@@ -909,11 +910,11 @@ func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
 	t.updateSystemHeaders()
 
 	for _, h := range t.Headers {
-		k := sanitizeText(h.Key.Text())
+		k := utils.SanitizeText(h.Key.Text())
 		k = strings.ReplaceAll(k, "\n", "")
 		k = strings.TrimSpace(k)
 
-		vRaw := sanitizeText(h.Value.Text())
+		vRaw := utils.SanitizeText(h.Value.Text())
 		vRaw = strings.ReplaceAll(vRaw, "\n", "")
 		vRaw = strings.TrimSpace(vRaw)
 
@@ -954,7 +955,7 @@ func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
 			finalData = string(body)
 		}
 
-		finalData = sanitizeText(finalData)
+		finalData = utils.SanitizeText(finalData)
 
 		select {
 		case <-t.ResponseChan:

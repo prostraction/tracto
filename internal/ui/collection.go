@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+	"tracto/internal/utils"
 
 	"github.com/nanorele/gio/widget"
 )
@@ -70,7 +71,7 @@ func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
 		return nil, err
 	}
 
-	colName := sanitizeText(ext.Info.Name)
+	colName := utils.SanitizeText(ext.Info.Name)
 	if colName == "" {
 		colName = "Imported Collection"
 	}
@@ -88,7 +89,7 @@ func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
 		for i := range items {
 			item := items[i]
 			node := &CollectionNode{
-				Name:  sanitizeText(item.Name),
+				Name:  utils.SanitizeText(item.Name),
 				Depth: depth,
 			}
 
@@ -106,18 +107,18 @@ func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
 
 				if err := json.Unmarshal(item.Request, &reqObj); err == nil {
 					if reqObj.Method != "" {
-						method = sanitizeText(reqObj.Method)
+						method = utils.SanitizeText(reqObj.Method)
 					}
 					if reqObj.Body.Mode == "raw" {
-						reqBody = sanitizeText(reqObj.Body.Raw)
+						reqBody = utils.SanitizeText(reqObj.Body.Raw)
 					}
 
 					switch u := reqObj.URL.(type) {
 					case string:
-						url = sanitizeText(u)
+						url = utils.SanitizeText(u)
 					case map[string]interface{}:
 						if raw, ok := u["raw"].(string); ok {
-							url = sanitizeText(raw)
+							url = utils.SanitizeText(raw)
 						}
 					}
 
@@ -127,7 +128,7 @@ func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
 								k, _ := hMap["key"].(string)
 								v, _ := hMap["value"].(string)
 								if k != "" {
-									headers[strings.TrimSpace(sanitizeText(k))] = strings.TrimSpace(sanitizeText(v))
+									headers[strings.TrimSpace(utils.SanitizeText(k))] = strings.TrimSpace(utils.SanitizeText(v))
 								}
 							}
 						}
@@ -135,12 +136,12 @@ func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
 				} else {
 					var urlStr string
 					if err := json.Unmarshal(item.Request, &urlStr); err == nil {
-						url = sanitizeText(urlStr)
+						url = utils.SanitizeText(urlStr)
 					}
 				}
 
 				node.Request = &ParsedRequest{
-					Name:    sanitizeText(item.Name),
+					Name:    utils.SanitizeText(item.Name),
 					Method:  method,
 					URL:     url,
 					Body:    reqBody,

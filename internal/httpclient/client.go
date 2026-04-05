@@ -6,24 +6,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"unicode"
+
+	"tracto/internal/utils"
 )
 
 const (
 	MaxReadSize      = 100 * 1024 * 1024
 	MaxDisplayLength = 50000
 )
-
-func sanitizeText(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) && r != '\n' && r != '\t' {
-			return -1
-		}
-		return r
-	}, strings.ToValidUTF8(s, "\uFFFD"))
-}
 
 func ExecuteRequest(method, reqUrl, reqBody string, headers map[string]string) (string, string, error) {
 	client := &http.Client{}
@@ -67,7 +57,7 @@ func ExecuteRequest(method, reqUrl, reqBody string, headers map[string]string) (
 		finalData = string(respBytes)
 	}
 
-	text := sanitizeText(finalData)
+	text := utils.SanitizeText(finalData)
 	runes := []rune(text)
 	if len(runes) > MaxDisplayLength {
 		text = string(runes[:MaxDisplayLength]) + "\n\n... [Response truncated due to limits]"

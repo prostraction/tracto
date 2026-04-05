@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 	"time"
-	"unicode"
+	"tracto/internal/utils"
 
 	"github.com/nanorele/gio-x/explorer"
 	"github.com/nanorele/gio/app"
@@ -81,17 +81,6 @@ type AppUI struct {
 	EditingEnv      *EnvironmentUI
 }
 
-func sanitizeText(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) && r != '\n' && r != '\t' {
-			return -1
-		}
-		return r
-	}, strings.ToValidUTF8(s, "\uFFFD"))
-}
-
 func measureTextWidth(gtx layout.Context, th *material.Theme, size unit.Sp, str string) int {
 	th.Shaper.LayoutString(text.Parameters{
 		PxPerEm:  fixed.I(gtx.Sp(size)),
@@ -113,7 +102,7 @@ func measureTextWidth(gtx layout.Context, th *material.Theme, size unit.Sp, str 
 }
 
 func measureTabWidth(gtx layout.Context, th *material.Theme, title string) int {
-	cleanTitle := sanitizeText(title)
+	cleanTitle := utils.SanitizeText(title)
 	cleanTitle = strings.ReplaceAll(cleanTitle, "\n", " ")
 	words := strings.Fields(cleanTitle)
 
@@ -1247,7 +1236,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 															gtx.Constraints.Min = gtx.Constraints.Max
 															return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 																return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(10), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-																	cleanTitle := sanitizeText(tab.Title)
+																	cleanTitle := utils.SanitizeText(tab.Title)
 																	cleanTitle = strings.ReplaceAll(cleanTitle, "\n", " ")
 																	if strings.TrimSpace(cleanTitle) == "" {
 																		cleanTitle = "New request"
