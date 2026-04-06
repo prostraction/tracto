@@ -236,7 +236,14 @@ func (ui *AppUI) Run() error {
 			}
 		Render:
 			gtx := app.NewContext(&ops, e)
-			ui.layoutApp(gtx)
+			layout.Inset{
+				Top:    e.Insets.Top,
+				Bottom: e.Insets.Bottom,
+				Left:   e.Insets.Left,
+				Right:  e.Insets.Right,
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return ui.layoutApp(gtx)
+			})
 			e.Frame(gtx.Ops)
 		}
 	}
@@ -441,25 +448,28 @@ func (ui *AppUI) layoutTitleBar(gtx layout.Context) layout.Dimensions {
 			for {
 				ev, ok := gtx.Event(pointer.Filter{
 					Target: &ui.TitleTag,
-					Kinds:  pointer.Press,
+					Kinds:  pointer.Press | pointer.Drag,
 				})
 				if !ok {
 					break
 				}
-				if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press && e.Buttons == pointer.ButtonPrimary {
-					now := time.Now()
-					if now.Sub(ui.LastTitleClick) < 300*time.Millisecond {
-						if ui.IsMaximized {
-							ui.Window.Perform(system.ActionUnmaximize)
-							ui.IsMaximized = false
+				if e, ok := ev.(pointer.Event); ok && e.Buttons == pointer.ButtonPrimary {
+					if e.Kind == pointer.Press {
+						now := time.Now()
+						if now.Sub(ui.LastTitleClick) < 300*time.Millisecond {
+							if ui.IsMaximized {
+								ui.Window.Perform(system.ActionUnmaximize)
+								ui.IsMaximized = false
+							} else {
+								ui.Window.Perform(system.ActionMaximize)
+								ui.IsMaximized = true
+							}
+							ui.LastTitleClick = time.Time{}
 						} else {
-							ui.Window.Perform(system.ActionMaximize)
-							ui.IsMaximized = true
+							ui.LastTitleClick = now
 						}
-						ui.LastTitleClick = time.Time{}
-					} else {
+					} else if e.Kind == pointer.Drag {
 						ui.Window.Perform(system.ActionMove)
-						ui.LastTitleClick = now
 					}
 				}
 			}
