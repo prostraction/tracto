@@ -219,8 +219,8 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 		prefix := textStr[:absoluteStart]
 		varText := textStr[absoluteStart:absoluteEnd]
 
-		pWidth := measureTextWidth(gtx, th, unit.Sp(13), monoFont, prefix)
-		vWidth := measureTextWidth(gtx, th, unit.Sp(13), monoFont, varText)
+		pWidth := measureTextWidth(gtx, th, unit.Sp(12), monoFont, prefix)
+		vWidth := measureTextWidth(gtx, th, unit.Sp(12), monoFont, varText)
 
 		bgColor := color.NRGBA{R: 130, G: 60, B: 60, A: 100}
 		if _, ok := env[varName]; ok {
@@ -241,7 +241,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	cl.Pop()
 
 	e := material.Editor(th, ed, hint)
-	e.TextSize = unit.Sp(13)
+	e.TextSize = unit.Sp(12)
 	e.Font = monoFont
 	dims := e.Layout(edGtx)
 	call := macro.Stop()
@@ -387,7 +387,8 @@ func (t *RequestTab) updateSystemHeaders() {
 
 	autoCT := "text/plain"
 	body := strings.TrimSpace(t.ReqEditor.Text())
-	if body != "" && (strings.HasPrefix(body, "{") || strings.HasPrefix(body, "[")) && json.Valid([]byte(body)) {
+	strippedBody := utils.StripJSONComments(body)
+	if strippedBody != "" && (strings.HasPrefix(strippedBody, "{") || strings.HasPrefix(strippedBody, "[")) && json.Valid([]byte(strippedBody)) {
 		autoCT = "application/json"
 	}
 
@@ -936,6 +937,12 @@ func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
 	}
 
 	reqBody := processTemplate(t.ReqEditor.Text(), env)
+	strippedBody := utils.StripJSONComments(reqBody)
+
+	if json.Valid([]byte(strippedBody)) {
+		reqBody = strippedBody
+	}
+
 	t.Status = "Sending..."
 	t.RespLines = []string{}
 

@@ -5,6 +5,44 @@ import (
 	"unicode"
 )
 
+func StripJSONComments(data string) string {
+	var result strings.Builder
+	inString := false
+	inLineComment := false
+
+	runes := []rune(data)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+
+		if inLineComment {
+			if r == '\n' {
+				inLineComment = false
+				result.WriteRune(r)
+			}
+			continue
+		}
+
+		if !inString && r == '/' && i+1 < len(runes) && runes[i+1] == '/' {
+			inLineComment = true
+			i++
+			continue
+		}
+
+		if r == '"' {
+			escapes := 0
+			for j := i - 1; j >= 0 && runes[j] == '\\'; j-- {
+				escapes++
+			}
+			if escapes%2 == 0 {
+				inString = !inString
+			}
+		}
+
+		result.WriteRune(r)
+	}
+	return result.String()
+}
+
 func SanitizeText(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
