@@ -140,7 +140,7 @@ func processTemplate(input string, env map[string]string) string {
 	})
 }
 
-func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, env map[string]string, frozenWidth int) layout.Dimensions {
+func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, env map[string]string, frozenWidth int, textSize unit.Sp) layout.Dimensions {
 	pX := gtx.Dp(unit.Dp(4))
 	pY := gtx.Dp(unit.Dp(6))
 
@@ -173,7 +173,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 
 	th.Shaper.LayoutString(text.Parameters{
 		Font:     monoFont,
-		PxPerEm:  fixed.I(gtx.Sp(unit.Sp(12))),
+		PxPerEm:  fixed.I(gtx.Sp(textSize)),
 		MaxWidth: gtx.Constraints.Max.X,
 		Locale:   gtx.Locale,
 	}, "A")
@@ -219,8 +219,8 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 		prefix := textStr[:absoluteStart]
 		varText := textStr[absoluteStart:absoluteEnd]
 
-		pWidth := measureTextWidth(gtx, th, unit.Sp(12), monoFont, prefix)
-		vWidth := measureTextWidth(gtx, th, unit.Sp(12), monoFont, varText)
+		pWidth := measureTextWidth(gtx, th, textSize, monoFont, prefix)
+		vWidth := measureTextWidth(gtx, th, textSize, monoFont, varText)
 
 		bgColor := color.NRGBA{R: 130, G: 60, B: 60, A: 100}
 		if _, ok := env[varName]; ok {
@@ -241,7 +241,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	cl.Pop()
 
 	e := material.Editor(th, ed, hint)
-	e.TextSize = unit.Sp(12)
+	e.TextSize = textSize
 	e.Font = monoFont
 	dims := e.Layout(edGtx)
 	call := macro.Stop()
@@ -616,7 +616,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 						} else {
 							t.LastURLWidth = gtx.Constraints.Max.X
 						}
-						return TextFieldOverlay(gtx, th, &t.URLInput, "https://api.example.com", true, activeEnv, frozenURLWidth)
+						return TextFieldOverlay(gtx, th, &t.URLInput, "https://api.example.com", true, activeEnv, frozenURLWidth, unit.Sp(12))
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -702,11 +702,11 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 														return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 															return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 																layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-																	return TextField(gtx, th, &h.Key, "Header Key", false, 0, unit.Sp(12))
+																	return TextFieldOverlay(gtx, th, &h.Key, "Header Key", false, activeEnv, 0, unit.Sp(12))
 																}),
 																layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
 																layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-																	return TextField(gtx, th, &h.Value, "Header Value", false, 0, unit.Sp(12))
+																	return TextFieldOverlay(gtx, th, &h.Value, "Header Value", false, activeEnv, 0, unit.Sp(12))
 																}),
 																layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
 																layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -746,7 +746,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 											} else {
 												t.LastReqWidth = gtx.Constraints.Max.X
 											}
-											return TextField(gtx, th, &t.ReqEditor, "Request Body", false, frozenReqWidth, unit.Sp(13))
+											return TextFieldOverlay(gtx, th, &t.ReqEditor, "Request Body", false, activeEnv, frozenReqWidth, unit.Sp(13))
 										})
 									}),
 								)
@@ -959,6 +959,7 @@ func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
 		k := utils.SanitizeText(h.Key.Text())
 		k = strings.ReplaceAll(k, "\n", "")
 		k = strings.TrimSpace(k)
+		k = processTemplate(k, env)
 
 		vRaw := utils.SanitizeText(h.Value.Text())
 		vRaw = strings.ReplaceAll(vRaw, "\n", "")
