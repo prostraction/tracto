@@ -165,3 +165,45 @@ func loadSavedEnvironments() []*ParsedEnvironment {
 	}
 	return envs
 }
+
+func buildExtItems(nodes []*CollectionNode) []ExtItem {
+	var items []ExtItem
+	for _, n := range nodes {
+		item := ExtItem{Name: n.Name}
+		if n.IsFolder {
+			item.Item = buildExtItems(n.Children)
+		} else if n.Request != nil {
+			req := ExtRequest{Method: n.Request.Method, URL: n.Request.URL}
+			if n.Request.Body != "" {
+				req.Body.Mode = "raw"
+				req.Body.Raw = n.Request.Body
+			}
+			var headers []map[string]interface{}
+			for k, v := range n.Request.Headers {
+				headers = append(headers, map[string]interface{}{"key": k, "value": v})
+			}
+			if len(headers) > 0 {
+				req.Header = headers
+			}
+			reqBytes, _ := json.Marshal(req)
+			item.Request = reqBytes
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func SaveCollectionToFile(col *ParsedCollection) error {
+	if col == nil || col.Root == nil {
+		return nil
+	}
+	ext := ExtCollection{}
+	ext.Info.Name = col.Name
+	ext.Item = buildExtItems(col.Root.Children)
+	data, err := json.MarshalIndent(ext, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(getCollectionsDir(), col.ID+".json")
+	return os.WriteFile(path, data, 0644)
+}

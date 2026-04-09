@@ -33,13 +33,26 @@ type ExtRequest struct {
 }
 
 type CollectionNode struct {
-	Name     string
-	IsFolder bool
-	Request  *ParsedRequest
-	Children []*CollectionNode
-	Expanded bool
-	Depth    int
-	Click    widget.Clickable
+	Name       string
+	IsFolder   bool
+	Request    *ParsedRequest
+	Children   []*CollectionNode
+	Expanded   bool
+	Depth      int
+	Click      widget.Clickable
+	Parent     *CollectionNode
+	Collection *ParsedCollection
+
+	MenuBtn   widget.Clickable
+	MenuOpen  bool
+	AddReqBtn widget.Clickable
+	AddFldBtn widget.Clickable
+	EditBtn   widget.Clickable
+	DupBtn    widget.Clickable
+	DelBtn    widget.Clickable
+
+	IsRenaming bool
+	NameEditor widget.Editor
 }
 
 type ParsedCollection struct {
@@ -58,6 +71,46 @@ type ParsedRequest struct {
 
 type CollectionUI struct {
 	Data *ParsedCollection
+}
+
+func cloneNode(node *CollectionNode, parent *CollectionNode) *CollectionNode {
+	dup := &CollectionNode{
+		Name:       node.Name + " Copy",
+		IsFolder:   node.IsFolder,
+		Depth:      node.Depth,
+		Parent:     parent,
+		Collection: node.Collection,
+	}
+	dup.NameEditor.SingleLine = true
+	dup.NameEditor.Submit = true
+
+	if node.Request != nil {
+		dup.Request = &ParsedRequest{
+			Name:   dup.Name,
+			Method: node.Request.Method,
+			URL:    node.Request.URL,
+			Body:   node.Request.Body,
+		}
+		dup.Request.Headers = make(map[string]string)
+		for k, v := range node.Request.Headers {
+			dup.Request.Headers[k] = v
+		}
+	}
+
+	for _, child := range node.Children {
+		dup.Children = append(dup.Children, cloneNode(child, dup))
+	}
+	return dup
+}
+
+func assignParents(node *CollectionNode, parent *CollectionNode, col *ParsedCollection) {
+	node.Parent = parent
+	node.Collection = col
+	node.NameEditor.SingleLine = true
+	node.NameEditor.Submit = true
+	for _, child := range node.Children {
+		assignParents(child, node, col)
+	}
 }
 
 func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
@@ -82,6 +135,8 @@ func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
 		Depth:    0,
 		Expanded: true,
 	}
+	root.NameEditor.SingleLine = true
+	root.NameEditor.Submit = true
 
 	var parseNode func(items []ExtItem, depth int) []*CollectionNode
 	parseNode = func(items []ExtItem, depth int) []*CollectionNode {
@@ -92,6 +147,8 @@ func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
 				Name:  utils.SanitizeText(item.Name),
 				Depth: depth,
 			}
+			node.NameEditor.SingleLine = true
+			node.NameEditor.Submit = true
 
 			if len(item.Item) > 0 {
 				node.IsFolder = true
@@ -160,6 +217,8 @@ func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
 		Name: colName,
 		Root: root,
 	}
+
+	assignParents(root, nil, col)
 
 	return col, nil
 }

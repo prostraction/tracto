@@ -109,6 +109,9 @@ type RequestTab struct {
 	IsDraggingSplit  bool
 	LastURLWidth     int
 	LastReqBody      string
+
+	LinkedNode   *CollectionNode
+	SaveToColBtn widget.Clickable
 }
 
 func NewRequestTab(title string) *RequestTab {
@@ -143,6 +146,8 @@ func processTemplate(input string, env map[string]string) string {
 }
 
 func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, env map[string]string, frozenWidth int, textSize unit.Sp) layout.Dimensions {
+	ed.SingleLine = true
+	ed.Submit = true
 	pX := gtx.Dp(unit.Dp(4))
 	pY := gtx.Dp(unit.Dp(6))
 
@@ -283,6 +288,8 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 }
 
 func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, frozenWidth int, textSize unit.Sp) layout.Dimensions {
+	ed.SingleLine = true
+	ed.Submit = true
 	p := gtx.Dp(unit.Dp(4))
 
 	availWidth := gtx.Constraints.Max.X
@@ -495,6 +502,24 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 		})
 	}
 
+	if t.SaveToColBtn.Clicked(gtx) {
+		if t.LinkedNode != nil && t.LinkedNode.Request != nil {
+			req := t.LinkedNode.Request
+			req.URL = t.URLInput.Text()
+			req.Method = t.Method
+			req.Body = t.ReqEditor.Text()
+			req.Headers = make(map[string]string)
+			for _, h := range t.Headers {
+				if !h.IsGenerated && h.Key.Text() != "" {
+					req.Headers[h.Key.Text()] = h.Value.Text()
+				}
+			}
+			if t.LinkedNode.Collection != nil {
+				SaveCollectionToFile(t.LinkedNode.Collection)
+			}
+		}
+	}
+
 	contentType := "none"
 	for _, h := range t.Headers {
 		if strings.EqualFold(h.Key.Text(), "Content-Type") {
@@ -635,6 +660,13 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 						return TextFieldOverlay(gtx, th, &t.URLInput, "https://api.example.com", true, activeEnv, frozenURLWidth, unit.Sp(12))
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if t.LinkedNode == nil {
+							return layout.Dimensions{}
+						}
+						return SquareBtn(gtx, &t.SaveToColBtn, iconSave, th)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						btn := material.Button(th, &t.SendBtn, "SEND")
 						btn.TextSize = unit.Sp(12)

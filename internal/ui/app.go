@@ -6,6 +6,8 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"tracto/internal/utils"
@@ -38,6 +40,12 @@ var (
 	iconSettings *widget.Icon
 	iconSave     *widget.Icon
 	iconBack     *widget.Icon
+	iconAddReq   *widget.Icon
+	iconAddFld   *widget.Icon
+	iconRename   *widget.Icon
+	iconDup      *widget.Icon
+	iconDel      *widget.Icon
+	iconMenu     *widget.Icon
 )
 
 func init() {
@@ -46,6 +54,12 @@ func init() {
 	iconSettings, _ = widget.NewIcon(icons.ActionSettings)
 	iconSave, _ = widget.NewIcon(icons.ContentSave)
 	iconBack, _ = widget.NewIcon(icons.NavigationArrowBack)
+	iconAddReq, _ = widget.NewIcon(icons.ActionNoteAdd)
+	iconAddFld, _ = widget.NewIcon(icons.FileCreateNewFolder)
+	iconRename, _ = widget.NewIcon(icons.EditorModeEdit)
+	iconDup, _ = widget.NewIcon(icons.ContentContentCopy)
+	iconDel, _ = widget.NewIcon(icons.ActionDelete)
+	iconMenu, _ = widget.NewIcon(icons.NavigationMoreVert)
 }
 
 type cachedTab struct {
@@ -330,8 +344,10 @@ func (ui *AppUI) saveState() {
 	go ui.saveStateSync()
 }
 
-func (ui *AppUI) openRequestInTab(req ParsedRequest) {
-	tab := NewRequestTab(req.Name)
+func (ui *AppUI) openRequestInTab(node *CollectionNode) {
+	tab := NewRequestTab(node.Name)
+	tab.LinkedNode = node
+	req := node.Request
 	tab.Method = req.Method
 	tab.URLInput.SetText(req.URL)
 	tab.ReqEditor.SetText(req.Body)
@@ -509,6 +525,25 @@ func (ui *AppUI) layoutTitleBar(gtx layout.Context) layout.Dimensions {
 	return layout.Dimensions{Size: image.Point{X: gtx.Constraints.Max.X, Y: height}}
 }
 
+func menuOption(gtx layout.Context, th *material.Theme, clk *widget.Clickable, title string, icon *widget.Icon) layout.Dimensions {
+	return material.Clickable(gtx, clk, func(gtx layout.Context) layout.Dimensions {
+		gtx.Constraints.Min.X = gtx.Dp(150)
+		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					gtx.Constraints.Min = image.Pt(gtx.Dp(16), gtx.Dp(16))
+					return icon.Layout(gtx, th.Palette.Fg)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Label(th, unit.Sp(12), title)
+					return lbl.Layout(gtx)
+				}),
+			)
+		})
+	})
+}
+
 func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 	size := gtx.Constraints.Max
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 24, G: 24, B: 24, A: 255}, clip.Rect{Max: size}.Op())
@@ -606,12 +641,114 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 					dim := material.List(ui.Theme, &ui.ColList).Layout(gtx, len(ui.VisibleCols), func(gtx layout.Context, i int) layout.Dimensions {
 						node := ui.VisibleCols[i]
 
+						for {
+							ev, ok := node.NameEditor.Update(gtx)
+							if !ok {
+								break
+							}
+							if _, ok := ev.(widget.SubmitEvent); ok {
+								node.Name = node.NameEditor.Text()
+								if node.Request != nil {
+									node.Request.Name = node.Name
+								}
+								node.IsRenaming = false
+								SaveCollectionToFile(node.Collection)
+							}
+						}
+
+						for node.MenuBtn.Clicked(gtx) {
+							for _, n := range ui.VisibleCols {
+								if n != node {
+									n.MenuOpen = false
+								}
+							}
+							node.MenuOpen = !node.MenuOpen
+							updateCols = true
+						}
+
+						for node.AddReqBtn.Clicked(gtx) {
+							newNode := &CollectionNode{
+								Name:       "New Request",
+								Request:    &ParsedRequest{Method: "GET"},
+								Depth:      node.Depth + 1,
+								Parent:     node,
+								Collection: node.Collection,
+								IsRenaming: true,
+							}
+							newNode.NameEditor.SetText("New Request")
+							node.Children = append(node.Children, newNode)
+							node.Expanded = true
+							node.MenuOpen = false
+							updateCols = true
+							SaveCollectionToFile(node.Collection)
+						}
+
+						for node.AddFldBtn.Clicked(gtx) {
+							newNode := &CollectionNode{
+								Name:       "New Folder",
+								IsFolder:   true,
+								Depth:      node.Depth + 1,
+								Parent:     node,
+								Collection: node.Collection,
+								IsRenaming: true,
+							}
+							newNode.NameEditor.SetText("New Folder")
+							node.Children = append(node.Children, newNode)
+							node.Expanded = true
+							node.MenuOpen = false
+							updateCols = true
+							SaveCollectionToFile(node.Collection)
+						}
+
+						for node.EditBtn.Clicked(gtx) {
+							node.IsRenaming = true
+							node.NameEditor.SetText(node.Name)
+							node.MenuOpen = false
+						}
+
+						for node.DupBtn.Clicked(gtx) {
+							dup := cloneNode(node, node.Parent)
+							if node.Parent != nil {
+								node.Parent.Children = append(node.Parent.Children, dup)
+							}
+							node.MenuOpen = false
+							updateCols = true
+							SaveCollectionToFile(node.Collection)
+						}
+
+						for node.DelBtn.Clicked(gtx) {
+							if node.Parent != nil {
+								for idx, c := range node.Parent.Children {
+									if c == node {
+										node.Parent.Children = append(node.Parent.Children[:idx], node.Parent.Children[idx+1:]...)
+										break
+									}
+								}
+								SaveCollectionToFile(node.Collection)
+							} else {
+								for idx, c := range ui.Collections {
+									if c.Data == node.Collection {
+										ui.Collections = append(ui.Collections[:idx], ui.Collections[idx+1:]...)
+										break
+									}
+								}
+								os.Remove(filepath.Join(getCollectionsDir(), node.Collection.ID+".json"))
+							}
+							for _, tab := range ui.Tabs {
+								if tab.LinkedNode == node {
+									tab.LinkedNode = nil
+								}
+							}
+							node.MenuOpen = false
+							updateCols = true
+						}
+
 						for node.Click.Clicked(gtx) {
 							if node.IsFolder {
 								node.Expanded = !node.Expanded
 								updateCols = true
 							} else if node.Request != nil {
-								ui.openRequestInTab(*node.Request)
+								ui.openRequestInTab(node)
 							}
 						}
 
@@ -619,47 +756,122 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 							Top: unit.Dp(1), Bottom: unit.Dp(1),
 							Left: unit.Dp(8), Right: unit.Dp(8),
 						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							gtx.Constraints.Min.X = gtx.Constraints.Max.X
-							return material.Clickable(gtx, &node.Click, func(gtx layout.Context) layout.Dimensions {
-								return layout.Inset{
-									Top: unit.Dp(4), Bottom: unit.Dp(4),
-									Left:  unit.Dp(float32(node.Depth * 12)),
-									Right: unit.Dp(4),
-								}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									var children []layout.FlexChild
+							return layout.Stack{}.Layout(gtx,
+								layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+									return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+										layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+											return material.Clickable(gtx, &node.Click, func(gtx layout.Context) layout.Dimensions {
+												gtx.Constraints.Min.X = gtx.Constraints.Max.X
+												return layout.Inset{
+													Top: unit.Dp(4), Bottom: unit.Dp(4),
+													Left:  unit.Dp(float32(node.Depth * 12)),
+													Right: unit.Dp(4),
+												}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+													var children []layout.FlexChild
 
-									if node.IsFolder {
-										txt := node.Name
-										if node.Expanded {
-											txt = "▼ " + txt
-										} else {
-											txt = "► " + txt
-										}
-										children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											lbl := material.Label(ui.Theme, unit.Sp(12), txt)
-											lbl.Alignment = text.Start
-											if node.Depth == 0 {
-												lbl.Font.Weight = font.Bold
-											}
-											return layout.W.Layout(gtx, lbl.Layout)
-										}))
-									} else if node.Request != nil {
-										children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											lbl := material.Label(ui.Theme, unit.Sp(10), node.Request.Method)
-											lbl.Color = getMethodColor(node.Request.Method)
-											return lbl.Layout(gtx)
-										}))
-										children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout))
-										children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											lbl := material.Label(ui.Theme, unit.Sp(12), node.Name)
-											lbl.Alignment = text.Start
-											return layout.W.Layout(gtx, lbl.Layout)
-										}))
+													if node.IsFolder {
+														txt := node.Name
+														if node.Expanded {
+															txt = "▼ " + txt
+														} else {
+															txt = "► " + txt
+														}
+														children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+															if node.IsRenaming {
+																return TextField(gtx, ui.Theme, &node.NameEditor, "", false, 0, unit.Sp(12))
+															}
+															lbl := material.Label(ui.Theme, unit.Sp(12), txt)
+															lbl.Alignment = text.Start
+															if node.Depth == 0 {
+																lbl.Font.Weight = font.Bold
+															}
+															return layout.W.Layout(gtx, lbl.Layout)
+														}))
+													} else if node.Request != nil {
+														children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+															lbl := material.Label(ui.Theme, unit.Sp(10), node.Request.Method)
+															lbl.Color = getMethodColor(node.Request.Method)
+															return lbl.Layout(gtx)
+														}))
+														children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout))
+														children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+															if node.IsRenaming {
+																return TextField(gtx, ui.Theme, &node.NameEditor, "", false, 0, unit.Sp(12))
+															}
+															lbl := material.Label(ui.Theme, unit.Sp(12), node.Name)
+															lbl.Alignment = text.Start
+															return layout.W.Layout(gtx, lbl.Layout)
+														}))
+													}
+
+													return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, children...)
+												})
+											})
+										}),
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											btn := material.Button(ui.Theme, &node.MenuBtn, "⋮")
+											btn.Background = color.NRGBA{}
+											btn.Color = ui.Theme.Palette.Fg
+											btn.Inset = layout.UniformInset(unit.Dp(2))
+											btn.TextSize = unit.Sp(14)
+											return btn.Layout(gtx)
+										}),
+									)
+								}),
+								layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+									if !node.MenuOpen {
+										return layout.Dimensions{}
 									}
 
-									return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, children...)
-								})
-							})
+									macro := op.Record(gtx.Ops)
+									layout.Inset{
+										Top:  unit.Dp(24),
+										Left: unit.Dp(float32(node.Depth*12) + 24),
+									}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										return widget.Border{
+											Color:        color.NRGBA{R: 60, G: 60, B: 60, A: 255},
+											CornerRadius: unit.Dp(4),
+											Width:        unit.Dp(1),
+										}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											return layout.Stack{}.Layout(gtx,
+												layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+													paint.FillShape(gtx.Ops, color.NRGBA{R: 35, G: 35, B: 35, A: 255}, clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 4).Op(gtx.Ops))
+													return layout.Dimensions{Size: gtx.Constraints.Min}
+												}),
+												layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+													return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+														var actions []layout.FlexChild
+														if node.IsFolder || node.Depth == 0 {
+															actions = append(actions, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+																return menuOption(gtx, ui.Theme, &node.AddReqBtn, "Add Request", iconAddReq)
+															}))
+															actions = append(actions, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+																return menuOption(gtx, ui.Theme, &node.AddFldBtn, "Add Folder", iconAddFld)
+															}))
+														}
+														actions = append(actions, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+															return menuOption(gtx, ui.Theme, &node.EditBtn, "Rename", iconRename)
+														}))
+														if node.Depth > 0 {
+															actions = append(actions, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+																return menuOption(gtx, ui.Theme, &node.DupBtn, "Duplicate", iconDup)
+															}))
+														}
+														actions = append(actions, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+															return menuOption(gtx, ui.Theme, &node.DelBtn, "Delete", iconDel)
+														}))
+														return layout.Flex{Axis: layout.Vertical}.Layout(gtx, actions...)
+													})
+												}),
+											)
+										})
+									})
+									call := macro.Stop()
+									op.Defer(gtx.Ops, call)
+
+									return layout.Dimensions{}
+								}),
+							)
 						})
 					})
 
