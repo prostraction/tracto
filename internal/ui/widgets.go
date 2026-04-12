@@ -131,63 +131,66 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	lineHeight, lineSpacing := getLineMetrics(gtx, th, textSize)
 	scrollX := ed.GetScrollX()
 
-	hasVars := ed.Len() >= 4
-	if hasVars && env != nil {
+	if ed.Len() >= 4 && env != nil {
 		textStr := ed.Text()
-		padY := gtx.Dp(unit.Dp(2))
-		numLines := strings.Count(textStr, "\n") + 1
-		totalHeight := numLines*lineSpacing + lineHeight
+		if strings.Contains(textStr, "{{") {
+			padY := gtx.Dp(unit.Dp(2))
 
-		cl := clip.Rect{
-			Min: image.Pt(0, -padY),
-			Max: image.Pt(edGtx.Constraints.Max.X, totalHeight+padY),
-		}.Push(gtx.Ops)
-
-		searchStr := textStr
-		offset := 0
-		for {
-			start := strings.Index(searchStr, "{{")
-			if start == -1 {
-				break
-			}
-			end := strings.Index(searchStr[start:], "}}")
-			if end == -1 {
-				break
-			}
-			end += start + 2
-
-			varName := strings.TrimSpace(searchStr[start+2 : end-2])
-			absoluteStart := offset + start
-			absoluteEnd := offset + end
-
-			lineIndex := strings.Count(textStr[:absoluteStart], "\n")
-			lineStart := strings.LastIndex(textStr[:absoluteStart], "\n") + 1
-			linePrefix := textStr[lineStart:absoluteStart]
-			varText := textStr[absoluteStart:absoluteEnd]
-
-			pWidth := measureTextWidth(gtx, th, textSize, monoFont, linePrefix)
-			vWidth := measureTextWidth(gtx, th, textSize, monoFont, varText)
-
-			bgColor := colorVarMissing
-			if _, ok := env[varName]; ok {
-				bgColor = colorVarFound
+			lineStarts := []int{0}
+			for i := 0; i < len(textStr); i++ {
+				if textStr[i] == '\n' {
+					lineStarts = append(lineStarts, i+1)
+				}
 			}
 
-			yOff := lineIndex * lineSpacing
-			x1 := pWidth - scrollX
-			x2 := x1 + vWidth
-			varTopY := yOff - padY
-			varBottomY := yOff + lineHeight + padY
+			totalHeight := len(lineStarts)*lineSpacing + lineHeight
+			cl := clip.Rect{
+				Min: image.Pt(0, -padY),
+				Max: image.Pt(edGtx.Constraints.Max.X, totalHeight+padY),
+			}.Push(gtx.Ops)
 
-			if x2 > 0 && x1 < edGtx.Constraints.Max.X {
-				rect := image.Rect(x1, varTopY, x2, varBottomY)
-				paint.FillShape(gtx.Ops, bgColor, clip.UniformRRect(rect, gtx.Dp(unit.Dp(3))).Op(gtx.Ops))
+			cornerR := gtx.Dp(unit.Dp(3))
+			idx := 0
+			for idx < len(textStr) {
+				start := strings.Index(textStr[idx:], "{{")
+				if start == -1 {
+					break
+				}
+				start += idx
+				end := strings.Index(textStr[start+2:], "}}")
+				if end == -1 {
+					break
+				}
+				end = start + 2 + end + 2
+
+				varName := strings.TrimSpace(textStr[start+2 : end-2])
+
+				lineIdx := 0
+				for lineIdx+1 < len(lineStarts) && lineStarts[lineIdx+1] <= start {
+					lineIdx++
+				}
+				lineStart := lineStarts[lineIdx]
+
+				pWidth := measureTextWidth(gtx, th, textSize, monoFont, textStr[lineStart:start])
+				vWidth := measureTextWidth(gtx, th, textSize, monoFont, textStr[start:end])
+
+				bgColor := colorVarMissing
+				if _, ok := env[varName]; ok {
+					bgColor = colorVarFound
+				}
+
+				x1 := pWidth - scrollX
+				x2 := x1 + vWidth
+				if x2 > 0 && x1 < edGtx.Constraints.Max.X {
+					yOff := lineIdx * lineSpacing
+					rect := image.Rect(x1, yOff-padY, x2, yOff+lineHeight+padY)
+					paint.FillShape(gtx.Ops, bgColor, clip.UniformRRect(rect, cornerR).Op(gtx.Ops))
+				}
+
+				idx = end
 			}
-
-			searchStr = searchStr[end:]
-			offset += end
+			cl.Pop()
 		}
-		cl.Pop()
 	}
 
 	e := material.Editor(th, ed, hint)

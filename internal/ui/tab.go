@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -84,7 +85,6 @@ type RequestTab struct {
 	ViewGeneratedBtn widget.Clickable
 	HeadersList      widget.List
 	ReqEditor        widget.Editor
-	RespLines        []string
 	RespListH        widget.List
 	WrapBtn          widget.Clickable
 	WrapEnabled      bool
@@ -253,21 +253,20 @@ func processTemplate(input string, env map[string]string) string {
 func (t *RequestTab) performSearch() {
 	query := t.SearchEditor.Text()
 	t.searchQuery = query
-	t.searchResults = nil
+	t.searchResults = t.searchResults[:0]
 	t.searchCurrent = 0
 	if query == "" {
 		return
 	}
-	lower := strings.ToLower(t.RespEditor.Text())
-	q := strings.ToLower(query)
-	idx := 0
-	for {
-		pos := strings.Index(lower[idx:], q)
-		if pos == -1 {
-			break
+	text := t.RespEditor.Text()
+	qLen := len(query)
+	for idx := 0; idx <= len(text)-qLen; {
+		if strings.EqualFold(text[idx:idx+qLen], query) {
+			t.searchResults = append(t.searchResults, idx)
+			idx += qLen
+		} else {
+			idx++
 		}
-		t.searchResults = append(t.searchResults, idx+pos)
-		idx += pos + len(q)
 	}
 }
 
@@ -400,10 +399,8 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 			t.isRequesting = false
 			t.cancelFn = nil
 			if t.PreviewEnabled && res.body != "" {
-				t.RespLines = strings.Split(res.body, "\n")
 				t.RespEditor.SetText(res.body)
 			} else if !t.PreviewEnabled {
-				t.RespLines = nil
 				t.RespEditor.SetText("")
 			}
 		}
@@ -499,7 +496,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 			}
 		}
 		if reader == nil {
-			reader = io.NopCloser(strings.NewReader(strings.Join(t.RespLines, "\n")))
+			reader = io.NopCloser(strings.NewReader(t.RespEditor.Text()))
 		}
 		gtx.Execute(clipboard.WriteCmd{
 			Type: "application/text",
@@ -1165,9 +1162,6 @@ func (t *RequestTab) layoutResponseBody(gtx layout.Context, th *material.Theme, 
 			ed.TextSize = unit.Sp(13)
 			ed.Font = font.Font{Typeface: "Ubuntu Mono"}
 			ed.Layout(edGtx)
-
-			cl := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
-			cl.Pop()
 			return layout.Dimensions{Size: gtx.Constraints.Max}
 		}),
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
@@ -1252,13 +1246,13 @@ func (t *RequestTab) layoutResponseBody(gtx layout.Context, th *material.Theme, 
 func formatSize(n int64) string {
 	switch {
 	case n >= 1<<30:
-		return fmt.Sprintf("%.2f GB", float64(n)/float64(1<<30))
+		return strconv.FormatFloat(float64(n)/float64(1<<30), 'f', 2, 64) + " GB"
 	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(n)/float64(1<<20))
+		return strconv.FormatFloat(float64(n)/float64(1<<20), 'f', 1, 64) + " MB"
 	case n >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(n)/float64(1<<10))
+		return strconv.FormatFloat(float64(n)/float64(1<<10), 'f', 1, 64) + " KB"
 	default:
-		return fmt.Sprintf("%d B", n)
+		return strconv.FormatInt(n, 10) + " B"
 	}
 }
 
@@ -1288,9 +1282,7 @@ func (t *RequestTab) prepareRequest(env map[string]string) (*http.Request, conte
 		url = "http://" + url
 	}
 
-	reqBody := t.ReqEditor.Text()
-	reqBody = strings.ReplaceAll(reqBody, "\u2003", "\t")
-	reqBody = strings.ReplaceAll(reqBody, "\uFEFF", "")
+	reqBody := strings.NewReplacer("\u2003", "\t", "\uFEFF", "").Replace(t.ReqEditor.Text())
 	reqBody = processTemplate(reqBody, env)
 	strippedBody := utils.StripJSONComments(reqBody)
 	if json.Valid([]byte(strippedBody)) {
@@ -1306,10 +1298,8 @@ func (t *RequestTab) prepareRequest(env map[string]string) (*http.Request, conte
 
 	t.updateSystemHeaders()
 	for _, h := range t.Headers {
-		k := strings.TrimSpace(strings.ReplaceAll(utils.SanitizeText(h.Key.Text()), "\n", ""))
-		v := strings.TrimSpace(strings.ReplaceAll(utils.SanitizeText(h.Value.Text()), "\n", ""))
-		k = processTemplate(k, env)
-		v = processTemplate(v, env)
+		k := strings.TrimSpace(processTemplate(h.Key.Text(), env))
+		v := strings.TrimSpace(processTemplate(h.Value.Text(), env))
 		if k != "" {
 			req.Header.Add(k, v)
 		}
@@ -1325,7 +1315,6 @@ func (t *RequestTab) beginRequest() {
 	default:
 	}
 	t.Status = "Sending..."
-	t.RespLines = nil
 	t.RespEditor.SetText("")
 	t.isRequesting = true
 	t.respSize = 0
@@ -1371,7 +1360,19 @@ func (t *RequestTab) streamResponse(ctx context.Context, body io.Reader, dest io
 	return total, nil
 }
 
-const previewBatchSize = 1024 * 1024
+const previewBatchSize = 5 * 1024 * 1024
+
+func tryIndentJSON(data []byte) string {
+	if !json.Valid(data) {
+		return ""
+	}
+	var buf bytes.Buffer
+	buf.Grow(len(data) * 2)
+	if err := json.Indent(&buf, data, "", "  "); err != nil {
+		return ""
+	}
+	return buf.String()
+}
 
 func loadPreviewFromFile(path string, totalSize int64) (string, int64) {
 	readSize := totalSize
@@ -1388,25 +1389,20 @@ func loadPreviewFromFile(path string, totalSize int64) (string, int64) {
 	n, _ := io.ReadFull(f, data)
 	data = data[:n]
 
-	var display string
-	if json.Valid(data) && totalSize <= previewBatchSize {
-		var buf bytes.Buffer
-		if err := json.Indent(&buf, data, "", "  "); err == nil {
-			display = buf.String()
-		} else {
-			display = string(data)
+	if totalSize <= previewBatchSize {
+		if formatted := tryIndentJSON(data); formatted != "" {
+			return utils.SanitizeText(formatted), int64(n)
 		}
-	} else {
-		display = string(data)
 	}
-	display = utils.SanitizeText(display)
-	return display, int64(n)
+
+	return utils.SanitizeText(string(data)), int64(n)
 }
 
 func (t *RequestTab) loadMorePreview() {
 	if t.respFile == "" || t.previewLoaded >= t.respSize {
 		return
 	}
+
 	f, err := os.Open(t.respFile)
 	if err != nil {
 		return
@@ -1423,11 +1419,13 @@ func (t *RequestTab) loadMorePreview() {
 	data = data[:n]
 
 	extra := utils.SanitizeText(string(data))
+	if formatted := tryIndentJSON(data); formatted != "" {
+		extra = utils.SanitizeText(formatted)
+	}
 	t.previewLoaded += int64(n)
 
 	current := t.RespEditor.Text()
 	t.RespEditor.SetText(current + extra)
-	t.RespLines = strings.Split(t.RespEditor.Text(), "\n")
 }
 
 func openFile(path string) {
@@ -1592,7 +1590,6 @@ func (t *RequestTab) loadPreviewForSavedFile() {
 	}
 	display, loaded := loadPreviewFromFile(t.respFile, t.respSize)
 	t.previewLoaded = loaded
-	t.RespLines = strings.Split(display, "\n")
 	t.RespEditor.SetText(display)
 	t.PreviewEnabled = true
 }
