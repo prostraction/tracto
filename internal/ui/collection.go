@@ -101,22 +101,6 @@ func nodeAtPath(root *CollectionNode, path []int) *CollectionNode {
 	return cur
 }
 
-func expandPathTo(root *CollectionNode, target *CollectionNode) {
-	var walk func(node *CollectionNode) bool
-	walk = func(node *CollectionNode) bool {
-		if node == target {
-			return true
-		}
-		for _, child := range node.Children {
-			if walk(child) {
-				node.Expanded = true
-				return true
-			}
-		}
-		return false
-	}
-	walk(root)
-}
 
 func cloneNode(node *CollectionNode, parent *CollectionNode) *CollectionNode {
 	dup := &CollectionNode{

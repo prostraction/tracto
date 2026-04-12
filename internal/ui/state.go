@@ -70,12 +70,6 @@ func loadState() AppState {
 	return state
 }
 
-func saveState(state AppState) {
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err == nil {
-		os.WriteFile(getStateFile(), data, 0644)
-	}
-}
 
 func saveCollectionRaw(data []byte) (string, error) {
 	bytes := make([]byte, 16)
