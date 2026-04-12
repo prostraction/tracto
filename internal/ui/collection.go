@@ -75,6 +75,49 @@ type CollectionUI struct {
 	Data *ParsedCollection
 }
 
+func nodePathFrom(root *CollectionNode, target *CollectionNode) []int {
+	if root == target {
+		return []int{}
+	}
+	for i, child := range root.Children {
+		if child == target {
+			return []int{i}
+		}
+		if sub := nodePathFrom(child, target); sub != nil {
+			return append([]int{i}, sub...)
+		}
+	}
+	return nil
+}
+
+func nodeAtPath(root *CollectionNode, path []int) *CollectionNode {
+	cur := root
+	for _, idx := range path {
+		if idx < 0 || idx >= len(cur.Children) {
+			return nil
+		}
+		cur = cur.Children[idx]
+	}
+	return cur
+}
+
+func expandPathTo(root *CollectionNode, target *CollectionNode) {
+	var walk func(node *CollectionNode) bool
+	walk = func(node *CollectionNode) bool {
+		if node == target {
+			return true
+		}
+		for _, child := range node.Children {
+			if walk(child) {
+				node.Expanded = true
+				return true
+			}
+		}
+		return false
+	}
+	walk(root)
+}
+
 func cloneNode(node *CollectionNode, parent *CollectionNode) *CollectionNode {
 	dup := &CollectionNode{
 		Name:       node.Name + " Copy",

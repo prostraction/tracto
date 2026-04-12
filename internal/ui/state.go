@@ -15,12 +15,16 @@ type HeaderState struct {
 }
 
 type TabState struct {
-	Title      string        `json:"title"`
-	Method     string        `json:"method"`
-	URL        string        `json:"url"`
-	Body       string        `json:"body"`
-	Headers    []HeaderState `json:"headers"`
-	SplitRatio float32       `json:"split_ratio"`
+	Title            string        `json:"title"`
+	Method           string        `json:"method"`
+	URL              string        `json:"url"`
+	Body             string        `json:"body"`
+	Headers          []HeaderState `json:"headers"`
+	SplitRatio       float32       `json:"split_ratio"`
+	HeaderSplitRatio float32       `json:"header_split_ratio,omitempty"`
+	ReqWrapEnabled   *bool         `json:"req_wrap_enabled,omitempty"`
+	CollectionID     string        `json:"collection_id,omitempty"`
+	NodePath         []int         `json:"node_path,omitempty"`
 }
 
 type AppState struct {

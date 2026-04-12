@@ -59,7 +59,7 @@ func (ui *EnvironmentUI) initEditor() {
 		r.Enabled.Value = v.Enabled
 		ui.Rows = append(ui.Rows, r)
 	}
-	ui.List.Axis = 1 // layout.Vertical
+	ui.List.Axis = 1
 }
 
 func ParseEnvironment(r io.Reader, id string) (*ParsedEnvironment, error) {

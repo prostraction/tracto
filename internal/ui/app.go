@@ -47,6 +47,8 @@ var (
 	iconDup      *widget.Icon
 	iconDel      *widget.Icon
 	iconMenu     *widget.Icon
+	iconSearch   *widget.Icon
+	iconDropDown *widget.Icon
 )
 
 func init() {
@@ -61,6 +63,8 @@ func init() {
 	iconDup, _ = widget.NewIcon(icons.ContentContentCopy)
 	iconDel, _ = widget.NewIcon(icons.ActionDelete)
 	iconMenu, _ = widget.NewIcon(icons.NavigationMoreVert)
+	iconSearch, _ = widget.NewIcon(icons.ActionSearch)
+	iconDropDown, _ = widget.NewIcon(icons.NavigationArrowDropDown)
 }
 
 type cachedTab struct {
@@ -108,6 +112,15 @@ type AppUI struct {
 	TabCtxClose       widget.Clickable
 	TabCtxCloseOthers widget.Clickable
 	TabCtxCloseAll    widget.Clickable
+
+	TabDragTag        bool
+	TabDragIdx        int
+	TabDragging       bool
+	TabDragOriginX    float32
+	TabDragOriginY    float32
+	TabDragCurrentX   float32
+	TabDragPressTime  time.Time
+	TabDragCurrentY   float32
 
 	tabWidthCache map[*RequestTab]cachedTab
 }
@@ -214,12 +227,58 @@ func NewAppUI() *AppUI {
 	return ui
 }
 
+func (ui *AppUI) revealLinkedNode(tab *RequestTab) {
+	if tab == nil || tab.LinkedNode == nil || tab.LinkedNode.Collection == nil {
+		return
+	}
+	changed := false
+	var walk func(node *CollectionNode) bool
+	walk = func(node *CollectionNode) bool {
+		if node == tab.LinkedNode {
+			return true
+		}
+		for _, child := range node.Children {
+			if walk(child) {
+				if !node.Expanded {
+					node.Expanded = true
+					changed = true
+				}
+				return true
+			}
+		}
+		return false
+	}
+	walk(tab.LinkedNode.Collection.Root)
+	if changed {
+		ui.updateVisibleCols()
+	}
+}
+
+func (ui *AppUI) relinkTabs() {
+	for _, tab := range ui.Tabs {
+		if tab.LinkedNode != nil || tab.pendingColID == "" {
+			continue
+		}
+		for _, col := range ui.Collections {
+			if col.Data.ID == tab.pendingColID {
+				node := nodeAtPath(col.Data.Root, tab.pendingNodePath)
+				if node != nil && node.Request != nil {
+					tab.LinkedNode = node
+					tab.pendingColID = ""
+					tab.pendingNodePath = nil
+				}
+				break
+			}
+		}
+	}
+}
+
 func (ui *AppUI) updateVisibleCols() {
 	var visible []*CollectionNode
 	var build func(node *CollectionNode)
 	build = func(node *CollectionNode) {
 		visible = append(visible, node)
-		if node.Expanded && node.IsFolder {
+		if node.Expanded && (node.IsFolder || node.Depth == 0) {
 			for _, child := range node.Children {
 				build(child)
 			}
@@ -238,6 +297,10 @@ func (ui *AppUI) Run() error {
 		ui.Explorer.ListenEvents(e)
 		switch e := e.(type) {
 		case app.DestroyEvent:
+			for _, tab := range ui.Tabs {
+				tab.cancelRequest()
+				tab.cleanupRespFile()
+			}
 			ui.saveStateSync()
 			return e.Err
 		case app.ConfigEvent:
@@ -247,6 +310,7 @@ func (ui *AppUI) Run() error {
 				select {
 				case col := <-ui.ColLoadedChan:
 					ui.Collections = append(ui.Collections, col)
+					ui.relinkTabs()
 					ui.updateVisibleCols()
 					ui.Window.Invalidate()
 				case env := <-ui.EnvLoadedChan:
@@ -292,6 +356,14 @@ func (ui *AppUI) loadState() {
 		if ts.SplitRatio > 0 {
 			tab.SplitRatio = ts.SplitRatio
 		}
+		if ts.HeaderSplitRatio > 0 {
+			tab.HeaderSplitRatio = ts.HeaderSplitRatio
+		}
+		if ts.ReqWrapEnabled != nil {
+			tab.ReqWrapEnabled = *ts.ReqWrapEnabled
+		}
+		tab.pendingColID = ts.CollectionID
+		tab.pendingNodePath = ts.NodePath
 		ui.Tabs = append(ui.Tabs, tab)
 	}
 	if len(ui.Tabs) == 0 {
@@ -313,6 +385,7 @@ func (ui *AppUI) loadState() {
 	for _, c := range loadedCols {
 		ui.Collections = append(ui.Collections, &CollectionUI{Data: c})
 	}
+	ui.relinkTabs()
 
 	loadedEnvs := loadSavedEnvironments()
 	for _, e := range loadedEnvs {
@@ -330,12 +403,19 @@ func (ui *AppUI) saveStateSync() {
 		SidebarEnvHeightPx: ui.SidebarEnvHeight,
 	}
 	for _, tab := range ui.Tabs {
+		reqWrap := tab.ReqWrapEnabled
 		ts := TabState{
-			Title:      tab.Title,
-			Method:     tab.Method,
-			URL:        tab.URLInput.Text(),
-			Body:       tab.ReqEditor.Text(),
-			SplitRatio: tab.SplitRatio,
+			Title:            tab.Title,
+			Method:           tab.Method,
+			URL:              tab.URLInput.Text(),
+			Body:             tab.ReqEditor.Text(),
+			SplitRatio:       tab.SplitRatio,
+			HeaderSplitRatio: tab.HeaderSplitRatio,
+			ReqWrapEnabled:   &reqWrap,
+		}
+		if tab.LinkedNode != nil && tab.LinkedNode.Collection != nil {
+			ts.CollectionID = tab.LinkedNode.Collection.ID
+			ts.NodePath = nodePathFrom(tab.LinkedNode.Collection.Root, tab.LinkedNode)
 		}
 		for _, h := range tab.Headers {
 			k := h.Key.Text()
@@ -354,7 +434,6 @@ func (ui *AppUI) saveState() {
 }
 
 func (ui *AppUI) openRequestInTab(node *CollectionNode) {
-	// If tab for this node is already open, switch to it
 	for i, t := range ui.Tabs {
 		if t.LinkedNode == node {
 			ui.ActiveIdx = i
@@ -567,7 +646,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 24, G: 24, B: 24, A: 255}, clip.Rect{Max: size}.Op())
 	gtx.Constraints.Min = size
 
-	// Clicking on sidebar background defocuses rename editor
 	bgClip := clip.Rect{Max: size}.Push(gtx.Ops)
 	event.Op(gtx.Ops, &ui.ColList)
 	for {
@@ -672,7 +750,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 						})
 					}
 
-					// Helper to commit rename and clear tracking
 					commitRename := func(n *CollectionNode) {
 						if n == nil || !n.IsRenaming {
 							return
@@ -693,41 +770,39 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 					dim := material.List(ui.Theme, &ui.ColList).Layout(gtx, len(ui.VisibleCols), func(gtx layout.Context, i int) layout.Dimensions {
 						node := ui.VisibleCols[i]
 
-						for {
-							ev, ok := node.NameEditor.Update(gtx)
-							if !ok {
-								break
-							}
-							if _, ok := ev.(widget.SubmitEvent); ok {
-								commitRename(node)
-							}
-						}
-
-						// Ctrl+S while editor is focused => commit rename
-						// Escape => cancel rename (restore original name)
-						for {
-							ev, ok := gtx.Event(
-								key.Filter{Focus: &node.NameEditor, Name: "S", Required: key.ModShortcut},
-								key.Filter{Focus: &node.NameEditor, Name: key.NameEscape},
-							)
-							if !ok {
-								break
-							}
-							if e, ok := ev.(key.Event); ok && e.State == key.Press {
-								if e.Name == key.NameEscape {
-									// Cancel: exit without saving
-									node.IsRenaming = false
-									node.RenamingFocused = false
-									if ui.RenamingNode == node {
-										ui.RenamingNode = nil
-									}
-								} else {
+						if node.IsRenaming {
+							for {
+								ev, ok := node.NameEditor.Update(gtx)
+								if !ok {
+									break
+								}
+								if _, ok := ev.(widget.SubmitEvent); ok {
 									commitRename(node)
+								}
+							}
+
+							for {
+								ev, ok := gtx.Event(
+									key.Filter{Focus: &node.NameEditor, Name: "S", Required: key.ModShortcut},
+									key.Filter{Focus: &node.NameEditor, Name: key.NameEscape},
+								)
+								if !ok {
+									break
+								}
+								if e, ok := ev.(key.Event); ok && e.State == key.Press {
+									if e.Name == key.NameEscape {
+										node.IsRenaming = false
+										node.RenamingFocused = false
+										if ui.RenamingNode == node {
+											ui.RenamingNode = nil
+										}
+									} else {
+										commitRename(node)
+									}
 								}
 							}
 						}
 
-						// Focus management for rename editor
 						if node.IsRenaming {
 							ui.RenamingNode = node
 							if gtx.Focused(&node.NameEditor) {
@@ -740,12 +815,11 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 						}
 
 						for node.MenuBtn.Clicked(gtx) {
-							// Close rename on another node if active
 							if ui.RenamingNode != nil && ui.RenamingNode != node {
 								commitRename(ui.RenamingNode)
 							}
-							for _, n := range ui.VisibleCols {
-								if n != node {
+							if !node.MenuOpen {
+								for _, n := range ui.VisibleCols {
 									n.MenuOpen = false
 								}
 							}
@@ -753,6 +827,7 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 							updateCols = true
 						}
 
+						if node.MenuOpen {
 						for node.AddReqBtn.Clicked(gtx) {
 							commitRename(ui.RenamingNode)
 							newNode := &CollectionNode{
@@ -833,9 +908,9 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 							node.MenuOpen = false
 							updateCols = true
 						}
+						}
 
 						for node.Click.Clicked(gtx) {
-							// Close rename if clicking on any node
 							if ui.RenamingNode != nil && ui.RenamingNode != node {
 								commitRename(ui.RenamingNode)
 							}
@@ -854,7 +929,18 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 							Top: unit.Dp(1), Bottom: unit.Dp(1),
 							Left: unit.Dp(8), Right: unit.Dp(8),
 						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							isActiveNode := false
+							if len(ui.Tabs) > 0 && ui.ActiveIdx >= 0 && ui.ActiveIdx < len(ui.Tabs) {
+								isActiveNode = ui.Tabs[ui.ActiveIdx].LinkedNode == node
+							}
+
 							return layout.Stack{}.Layout(gtx,
+								layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+									if isActiveNode {
+										paint.FillShape(gtx.Ops, color.NRGBA{R: 14, G: 99, B: 156, A: 40}, clip.Rect{Max: gtx.Constraints.Min}.Op())
+									}
+									return layout.Dimensions{Size: gtx.Constraints.Min}
+								}),
 								layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 									return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 										layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -1344,7 +1430,10 @@ func (ui *AppUI) closeTab(idx int) {
 	if idx < 0 || idx >= len(ui.Tabs) {
 		return
 	}
-	delete(ui.tabWidthCache, ui.Tabs[idx])
+	tab := ui.Tabs[idx]
+	tab.cancelRequest()
+	tab.cleanupRespFile()
+	delete(ui.tabWidthCache, tab)
 	ui.Tabs = append(ui.Tabs[:idx], ui.Tabs[idx+1:]...)
 	if ui.ActiveIdx >= idx && ui.ActiveIdx > 0 {
 		ui.ActiveIdx--
@@ -1355,11 +1444,11 @@ func (ui *AppUI) closeTab(idx int) {
 }
 
 func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
-	// Global keyboard shortcuts: Ctrl+S save, Ctrl+W close tab
 	for {
 		ev, ok := gtx.Event(
 			key.Filter{Name: "S", Required: key.ModShortcut},
 			key.Filter{Name: "W", Required: key.ModShortcut},
+			key.Filter{Name: "F", Required: key.ModShortcut},
 		)
 		if !ok {
 			break
@@ -1373,6 +1462,10 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 			case "W":
 				if len(ui.Tabs) > 0 {
 					ui.closeTab(ui.ActiveIdx)
+				}
+			case "F":
+				if ui.ActiveIdx >= 0 && ui.ActiveIdx < len(ui.Tabs) {
+					ui.Tabs[ui.ActiveIdx].SearchOpen = !ui.Tabs[ui.ActiveIdx].SearchOpen
 				}
 			}
 		}
@@ -1396,7 +1489,6 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 		}
 	}
 
-	// Tab context menu actions
 	for ui.TabCtxClose.Clicked(gtx) {
 		ui.closeTab(ui.TabCtxMenuIdx)
 		ui.TabCtxMenuOpen = false
@@ -1462,13 +1554,19 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 		}
 	}
 
+	minSidebarWidth := gtx.Dp(unit.Dp(200))
+	maxSidebarWidth := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(300))
+	if ui.SidebarWidth < minSidebarWidth {
+		ui.SidebarWidth = minSidebarWidth
+	}
+	if ui.SidebarWidth > maxSidebarWidth && maxSidebarWidth > minSidebarWidth {
+		ui.SidebarWidth = maxSidebarWidth
+	}
+
 	if moved {
 		delta := finalX - ui.SidebarDragX
 		oldWidth := ui.SidebarWidth
 		ui.SidebarWidth += int(delta)
-
-		minSidebarWidth := gtx.Dp(unit.Dp(200))
-		maxSidebarWidth := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(300))
 		if ui.SidebarWidth < minSidebarWidth {
 			ui.SidebarWidth = minSidebarWidth
 		}
@@ -1605,7 +1703,135 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 							}
 						}
 
-						return material.List(ui.Theme, &ui.TabsList).Layout(gtx, len(rows), func(gtx layout.Context, rIdx int) layout.Dimensions {
+						th := float32(tabHeight)
+
+						tabIdxAtXY := func(x, y float32) int {
+							rowIdx := int(y / th)
+							if rowIdx < 0 {
+								rowIdx = 0
+							}
+							if rowIdx >= len(rows) {
+								rowIdx = len(rows) - 1
+							}
+							row := rows[rowIdx]
+							acc := float32(0)
+							for _, tIdx := range row {
+								if tIdx < 0 {
+									continue
+								}
+								w := float32(tabs[tIdx].FinalWidth)
+								if x < acc+w {
+									return tIdx
+								}
+								acc += w
+							}
+							if len(row) > 0 {
+								last := row[len(row)-1]
+								if last == -1 && len(row) > 1 {
+									last = row[len(row)-2]
+								}
+								if last >= 0 {
+									return last
+								}
+							}
+							return -1
+						}
+
+						tabPosInRow := func(idx int) (row int, xOff float32) {
+							for r, rr := range rows {
+								x := float32(0)
+								for _, tIdx := range rr {
+									if tIdx == idx {
+										return r, x
+									}
+									if tIdx >= 0 {
+										x += float32(tabs[tIdx].FinalWidth)
+									}
+								}
+							}
+							return 0, 0
+						}
+
+						swapTabs := func(a, b int) {
+							ui.Tabs[a], ui.Tabs[b] = ui.Tabs[b], ui.Tabs[a]
+							tabs[a], tabs[b] = tabs[b], tabs[a]
+							if ui.ActiveIdx == a {
+								ui.ActiveIdx = b
+							} else if ui.ActiveIdx == b {
+								ui.ActiveIdx = a
+							}
+						}
+
+						for {
+							ev, ok := gtx.Event(pointer.Filter{
+								Target: &ui.TabDragTag,
+								Kinds:  pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel,
+							})
+							if !ok {
+								break
+							}
+							if pe, ok := ev.(pointer.Event); ok {
+								switch pe.Kind {
+								case pointer.Press:
+									if pe.Buttons.Contain(pointer.ButtonPrimary) {
+										hit := tabIdxAtXY(pe.Position.X, pe.Position.Y)
+										if hit >= 0 {
+											hitRow, xOff := tabPosInRow(hit)
+											ui.TabDragIdx = hit
+											ui.TabDragOriginX = pe.Position.X - xOff
+											ui.TabDragOriginY = pe.Position.Y - float32(hitRow)*th
+											ui.TabDragCurrentX = pe.Position.X
+											ui.TabDragCurrentY = pe.Position.Y
+											ui.TabDragging = false
+											ui.TabDragPressTime = gtx.Now
+										}
+									}
+								case pointer.Drag:
+									ui.TabDragCurrentX = pe.Position.X
+									ui.TabDragCurrentY = pe.Position.Y
+									if !ui.TabDragging && ui.TabDragIdx >= 0 {
+										elapsed := gtx.Now.Sub(ui.TabDragPressTime)
+										dx := pe.Position.X - (ui.TabDragOriginX + float32(tabs[ui.TabDragIdx].FinalWidth)/2)
+										dy := pe.Position.Y - (ui.TabDragOriginY + th/2)
+										dist := dx*dx + dy*dy
+										if elapsed > 150*time.Millisecond && dist > 100 {
+											ui.TabDragging = true
+										}
+									}
+									if ui.TabDragging && ui.TabDragIdx >= 0 && ui.TabDragIdx < len(ui.Tabs) {
+										target := tabIdxAtXY(pe.Position.X, pe.Position.Y)
+										if target >= 0 && target != ui.TabDragIdx {
+											old := ui.TabDragIdx
+											if target > old {
+												for i := old; i < target; i++ {
+													swapTabs(i, i+1)
+												}
+											} else {
+												for i := old; i > target; i-- {
+													swapTabs(i, i-1)
+												}
+											}
+											ui.TabDragIdx = target
+										}
+									}
+								case pointer.Release, pointer.Cancel:
+									if ui.TabDragging {
+										ui.saveState()
+									}
+									ui.TabDragging = false
+									ui.TabDragIdx = -1
+								}
+							}
+						}
+
+						clipStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
+						passStack := pointer.PassOp{}.Push(gtx.Ops)
+						event.Op(gtx.Ops, &ui.TabDragTag)
+
+						var dragTabOX, dragTabOY int
+						var dragTabW int
+
+						listDims := material.List(ui.Theme, &ui.TabsList).Layout(gtx, len(rows), func(gtx layout.Context, rIdx int) layout.Dimensions {
 							row := rows[rIdx]
 							var children []layout.FlexChild
 
@@ -1619,17 +1845,26 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 										gtx.Constraints.Min.Y = tabHeight
 										gtx.Constraints.Max.Y = tabHeight
 
-										tab := ui.Tabs[idx]
-										if tab.TabBtn.Clicked(gtx) {
-											ui.ActiveIdx = idx
-											ui.TabCtxMenuOpen = false
+										if ui.TabDragging && ui.TabDragIdx == idx {
+											dragTabOX = int(ui.TabDragCurrentX - ui.TabDragOriginX)
+											dragTabOY = int(ui.TabDragCurrentY - ui.TabDragOriginY)
+											dragTabW = finalW
+											paint.FillShape(gtx.Ops, color.NRGBA{R: 20, G: 20, B: 20, A: 255}, clip.Rect{Max: image.Pt(finalW, tabHeight)}.Op())
+											return layout.Dimensions{Size: image.Pt(finalW, tabHeight)}
 										}
 
-										// Right-click context menu
-										event.Op(gtx.Ops, tab)
+										tab := ui.Tabs[idx]
+										if tab.TabBtn.Clicked(gtx) {
+											if !ui.TabDragging {
+												ui.ActiveIdx = idx
+												ui.TabCtxMenuOpen = false
+												ui.revealLinkedNode(tab)
+											}
+										}
+
 										for {
 											ev, ok := gtx.Event(pointer.Filter{
-												Target: tab,
+												Target: &tab.TabBtn,
 												Kinds:  pointer.Press,
 											})
 											if !ok {
@@ -1640,7 +1875,6 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 												ui.TabCtxMenuIdx = idx
 											}
 										}
-
 										bgColor := color.NRGBA{R: 24, G: 24, B: 24, A: 255}
 										fgColor := color.NRGBA{R: 150, G: 150, B: 150, A: 255}
 										if idx == ui.ActiveIdx {
@@ -1770,6 +2004,45 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 
 							return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, children...)
 						})
+
+						passStack.Pop()
+						clipStack.Pop()
+
+						if ui.TabDragging && ui.TabDragIdx >= 0 && ui.TabDragIdx < len(ui.Tabs) {
+							dragMacro := op.Record(gtx.Ops)
+							op.Offset(image.Pt(dragTabOX, dragTabOY)).Add(gtx.Ops)
+							dIdx := ui.TabDragIdx
+							dTab := ui.Tabs[dIdx]
+							dW := dragTabW
+							if dW <= 0 {
+								dW = tabs[dIdx].FinalWidth
+							}
+							dGtx := gtx
+							dGtx.Constraints.Min = image.Pt(dW, tabHeight)
+							dGtx.Constraints.Max = dGtx.Constraints.Min
+							bgc := color.NRGBA{R: 31, G: 31, B: 31, A: 240}
+							fgc := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+							paint.FillShape(dGtx.Ops, bgc, clip.Rect{Max: dGtx.Constraints.Min}.Op())
+							paint.FillShape(dGtx.Ops, color.NRGBA{R: 14, G: 99, B: 156, A: 255}, clip.Rect{Max: image.Point{X: dW, Y: dGtx.Dp(unit.Dp(2))}}.Op())
+							layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(10), Right: unit.Dp(6)}.Layout(dGtx, func(gtx layout.Context) layout.Dimensions {
+								t := utils.SanitizeText(dTab.Title)
+								t = strings.ReplaceAll(t, "\n", " ")
+								if strings.TrimSpace(t) == "" {
+									t = "New request"
+								}
+								if dTab.IsDirty {
+									t = "● " + t
+								}
+								lbl := material.Label(ui.Theme, unit.Sp(12), t)
+								lbl.Color = fgc
+								lbl.MaxLines = 2
+								lbl.Truncator = "..."
+								return lbl.Layout(gtx)
+							})
+							op.Defer(gtx.Ops, dragMacro.Stop())
+						}
+
+						return listDims
 					})
 				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -1777,8 +2050,25 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 						tab := ui.Tabs[ui.ActiveIdx]
 
 						for tab.SendBtn.Clicked(gtx) {
+							tab.SendMenuOpen = false
 							tab.executeRequest(ui.Window, activeEnvVars)
 							ui.saveState()
+						}
+						for tab.CancelBtn.Clicked(gtx) {
+							tab.cancelRequest()
+						}
+						for tab.SaveToFileBtn.Clicked(gtx) {
+							tab.SendMenuOpen = false
+							go func() {
+								w, err := ui.Explorer.CreateFile("response.json")
+								if err != nil || w == nil {
+									return
+								}
+								if f, ok := w.(*os.File); ok {
+									tab.SaveToFilePath = f.Name()
+								}
+								tab.executeRequestToFile(ui.Window, activeEnvVars, w)
+							}()
 						}
 
 						isDragging := ui.SidebarDrag.Dragging() || ui.SidebarEnvDrag.Dragging()
@@ -1792,7 +2082,6 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 		}),
 	)
 
-	// Tab context menu overlay
 	if ui.TabCtxMenuOpen {
 		macro := op.Record(gtx.Ops)
 		op.Offset(image.Pt(gtx.Dp(unit.Dp(80)), gtx.Dp(unit.Dp(30)))).Add(gtx.Ops)
@@ -1807,7 +2096,6 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 			})
 		}
 
-		// Measure menu content
 		rec := op.Record(gtx.Ops)
 		menuGtx := gtx
 		menuGtx.Constraints.Min = image.Point{}
@@ -1827,22 +2115,18 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 		})
 		menuCall := rec.Stop()
 
-		// Background + border using exact measured size
 		sz := menuDims.Size
 		b := 1
 		if gtx.Dp(unit.Dp(1)) > 1 {
 			b = gtx.Dp(unit.Dp(1))
 		}
-		// Border (slightly larger rect)
 		paint.FillShape(gtx.Ops, color.NRGBA{R: 60, G: 60, B: 60, A: 255},
 			clip.UniformRRect(image.Rectangle{Max: image.Pt(sz.X+b*2, sz.Y+b*2)}, 4).Op(gtx.Ops))
-		// Background
 		op.Offset(image.Pt(b, b)).Add(gtx.Ops)
 		paint.FillShape(gtx.Ops, color.NRGBA{R: 35, G: 35, B: 35, A: 255},
 			clip.UniformRRect(image.Rectangle{Max: sz}, 3).Op(gtx.Ops))
 		op.Offset(image.Pt(-b, -b)).Add(gtx.Ops)
 
-		// Replay menu content on top
 		menuCall.Add(gtx.Ops)
 
 		call := macro.Stop()

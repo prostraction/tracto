@@ -2,13 +2,20 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 	"tracto/internal/utils"
 
@@ -55,9 +62,7 @@ var (
 	iconWrap *widget.Icon
 )
 
-var httpClient = &http.Client{
-	Timeout: 15 * time.Second,
-}
+var httpClient = &http.Client{}
 
 var tplRegex = regexp.MustCompile(`\{\{([^}]+)\}\}`)
 
@@ -108,11 +113,46 @@ type RequestTab struct {
 	LastRespWidth    int
 	IsDraggingSplit  bool
 	LastURLWidth     int
-	LastReqBody      string
+	LinkedNode       *CollectionNode
+	SaveToColBtn     widget.Clickable
+	IsDirty          bool
+	pendingColID     string
+	pendingNodePath  []int
 
-	LinkedNode   *CollectionNode
-	SaveToColBtn widget.Clickable
-	IsDirty      bool
+	cancelFunc      context.CancelFunc
+	IsRequesting    bool
+	CancelBtn       widget.Clickable
+	RespSize        int64
+	downloadedBytes atomic.Int64
+	respFilePath    string
+
+	SendMenuBtn     widget.Clickable
+	SendMenuOpen    bool
+	SaveToFileBtn   widget.Clickable
+	SaveToFilePath  string
+	ShowPreviewBtn  widget.Clickable
+	PreviewEnabled  bool
+	LoadMoreBtn     widget.Clickable
+	previewLoaded   int64
+	OpenFileBtn     widget.Clickable
+	PropertiesBtn   widget.Clickable
+
+	ReqWrapEnabled  bool
+	ReqWrapBtn      widget.Clickable
+	ReqListH        widget.List
+	HeaderSplitRatio float32
+	HeaderSplitDrag gesture.Drag
+	HeaderSplitDragX float32
+
+	SearchOpen      bool
+	SearchEditor    widget.Editor
+	SearchBtn       widget.Clickable
+	SearchNextBtn   widget.Clickable
+	SearchPrevBtn   widget.Clickable
+	SearchCloseBtn  widget.Clickable
+	searchQuery     string
+	searchResults   []int
+	searchCurrent   int
 }
 
 func NewRequestTab(title string) *RequestTab {
@@ -125,11 +165,16 @@ func NewRequestTab(title string) *RequestTab {
 		ResponseChan:     make(chan [2]string, 1),
 		SplitRatio:       0.5,
 		WrapEnabled:      true,
+		ReqWrapEnabled:   true,
 		HeadersExpanded:  false,
+		HeaderSplitRatio: 0.35,
 	}
 	t.URLInput.Submit = true
 	t.HeadersList.Axis = layout.Vertical
 	t.RespListH.Axis = layout.Horizontal
+	t.ReqListH.Axis = layout.Horizontal
+	t.SearchEditor.SingleLine = true
+	t.SearchEditor.Submit = true
 	return t
 }
 
@@ -139,26 +184,31 @@ func (t *RequestTab) checkDirty() {
 		return
 	}
 	req := t.LinkedNode.Request
-	if t.Method != req.Method || t.URLInput.Text() != req.URL || t.ReqEditor.Text() != req.Body {
+	if t.Method != req.Method {
 		t.IsDirty = true
 		return
 	}
-	// Compare headers
-	tabHeaders := make(map[string]string)
+	if t.URLInput.Len() != len(req.URL) || t.URLInput.Text() != req.URL {
+		t.IsDirty = true
+		return
+	}
+	if t.ReqEditor.Len() != len(req.Body) {
+		t.IsDirty = true
+		return
+	}
+	userHeaders := 0
 	for _, h := range t.Headers {
 		if !h.IsGenerated && h.Key.Text() != "" {
-			tabHeaders[h.Key.Text()] = h.Value.Text()
+			userHeaders++
+			if v, ok := req.Headers[h.Key.Text()]; !ok || v != h.Value.Text() {
+				t.IsDirty = true
+				return
+			}
 		}
 	}
-	if len(tabHeaders) != len(req.Headers) {
+	if userHeaders != len(req.Headers) {
 		t.IsDirty = true
 		return
-	}
-	for k, v := range tabHeaders {
-		if req.Headers[k] != v {
-			t.IsDirty = true
-			return
-		}
 	}
 	t.IsDirty = false
 }
@@ -248,10 +298,6 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	scrollX := ed.GetScrollX()
 	textStr := ed.Text()
 
-	extY := gtx.Dp(unit.Dp(2))
-	offsetY := gtx.Dp(unit.Dp(1))
-
-	// Measure actual line spacing by laying out two lines
 	th.Shaper.LayoutString(text.Parameters{
 		Font:    monoFont,
 		PxPerEm: fixed.I(gtx.Sp(textSize)),
@@ -276,12 +322,14 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 		lineSpacing = int(float64(lineHeight) * 1.2)
 	}
 
+	padY := gtx.Dp(unit.Dp(2))
+
 	numLines := strings.Count(textStr, "\n") + 1
 	totalHeight := numLines*lineSpacing + lineHeight
 
 	cl := clip.Rect{
-		Min: image.Pt(0, -extY+offsetY),
-		Max: image.Pt(edGtx.Constraints.Max.X, totalHeight+extY+offsetY),
+		Min: image.Pt(0, -padY),
+		Max: image.Pt(edGtx.Constraints.Max.X, totalHeight+padY),
 	}.Push(gtx.Ops)
 
 	searchStr := textStr
@@ -301,7 +349,6 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 		absoluteStart := offset + start
 		absoluteEnd := offset + end
 
-		// Find which line the variable is on and its position within that line
 		lineIndex := strings.Count(textStr[:absoluteStart], "\n")
 		lineStart := strings.LastIndex(textStr[:absoluteStart], "\n") + 1
 		linePrefix := textStr[lineStart:absoluteStart]
@@ -318,8 +365,8 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 		yOff := lineIndex * lineSpacing
 		x1 := pWidth - scrollX
 		x2 := x1 + vWidth
-		varTopY := -extY + offsetY + yOff
-		varBottomY := lineHeight + extY + offsetY + yOff
+		varTopY := yOff - padY
+		varBottomY := yOff + lineHeight + padY
 
 		if x2 > 0 && x1 < edGtx.Constraints.Max.X {
 			rect := image.Rect(x1, varTopY, x2, varBottomY)
@@ -455,6 +502,43 @@ func SquareBtn(gtx layout.Context, clk *widget.Clickable, ic *widget.Icon, th *m
 	})
 }
 
+func (t *RequestTab) performSearch() {
+	query := t.SearchEditor.Text()
+	t.searchQuery = query
+	t.searchResults = nil
+	t.searchCurrent = 0
+	if query == "" {
+		return
+	}
+	text := t.RespEditor.Text()
+	lower := strings.ToLower(text)
+	q := strings.ToLower(query)
+	idx := 0
+	for {
+		pos := strings.Index(lower[idx:], q)
+		if pos == -1 {
+			break
+		}
+		t.searchResults = append(t.searchResults, idx+pos)
+		idx += pos + len(q)
+	}
+}
+
+func (t *RequestTab) searchNavigate(dir int) {
+	if len(t.searchResults) == 0 {
+		return
+	}
+	t.searchCurrent += dir
+	if t.searchCurrent >= len(t.searchResults) {
+		t.searchCurrent = 0
+	}
+	if t.searchCurrent < 0 {
+		t.searchCurrent = len(t.searchResults) - 1
+	}
+	pos := t.searchResults[t.searchCurrent]
+	t.RespEditor.SetCaret(pos, pos+len(t.searchQuery))
+}
+
 func (t *RequestTab) addHeader(k, v string) {
 	h := &HeaderItem{IsGenerated: false}
 	h.Key.SetText(k)
@@ -484,8 +568,7 @@ func (t *RequestTab) updateSystemHeaders() {
 
 	autoCT := "text/plain"
 	body := strings.TrimSpace(t.ReqEditor.Text())
-	strippedBody := utils.StripJSONComments(body)
-	if strippedBody != "" && (strings.HasPrefix(strippedBody, "{") || strings.HasPrefix(strippedBody, "[")) && json.Valid([]byte(strippedBody)) {
+	if len(body) > 0 && (body[0] == '{' || body[0] == '[') {
 		autoCT = "application/json"
 	}
 
@@ -536,22 +619,83 @@ func (t *RequestTab) updateSystemHeaders() {
 }
 
 func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Window, activeEnv map[string]string, isAppDragging bool, onSave func()) layout.Dimensions {
-	currentBody := t.ReqEditor.Text()
-	if currentBody != t.LastReqBody {
-		t.LastReqBody = currentBody
-		t.updateSystemHeaders()
+	for {
+		ev, ok := t.ReqEditor.Update(gtx)
+		if !ok {
+			break
+		}
+		if _, ok := ev.(widget.ChangeEvent); ok {
+			t.updateSystemHeaders()
+		}
 	}
 
 	select {
 	case res := <-t.ResponseChan:
 		t.Status = res[0]
-		t.RespLines = strings.Split(res[1], "\n")
-		t.RespEditor.SetText(res[1])
+		if t.PreviewEnabled && res[1] != "" {
+			t.RespLines = strings.Split(res[1], "\n")
+			t.RespEditor.SetText(res[1])
+		} else if !t.PreviewEnabled {
+			t.RespLines = []string{}
+			t.RespEditor.SetText("")
+		}
 	default:
+	}
+
+	for t.SendMenuBtn.Clicked(gtx) {
+		t.SendMenuOpen = !t.SendMenuOpen
+	}
+	for t.SaveToFileBtn.Clicked(gtx) {
+		t.SendMenuOpen = false
+	}
+	for t.ShowPreviewBtn.Clicked(gtx) {
+		t.loadPreviewForSavedFile()
+	}
+	for t.LoadMoreBtn.Clicked(gtx) {
+		t.loadMorePreview()
+	}
+	for t.OpenFileBtn.Clicked(gtx) {
+		if t.SaveToFilePath != "" {
+			go openFile(t.SaveToFilePath)
+		}
+	}
+	for t.PropertiesBtn.Clicked(gtx) {
+		if t.SaveToFilePath != "" {
+			go openFileInExplorer(t.SaveToFilePath)
+		}
 	}
 
 	for t.WrapBtn.Clicked(gtx) {
 		t.WrapEnabled = !t.WrapEnabled
+	}
+	for t.ReqWrapBtn.Clicked(gtx) {
+		t.ReqWrapEnabled = !t.ReqWrapEnabled
+	}
+	for t.SearchBtn.Clicked(gtx) {
+		t.SearchOpen = !t.SearchOpen
+	}
+	for t.SearchCloseBtn.Clicked(gtx) {
+		t.SearchOpen = false
+		t.searchResults = nil
+	}
+	for t.SearchNextBtn.Clicked(gtx) {
+		t.searchNavigate(1)
+	}
+	for t.SearchPrevBtn.Clicked(gtx) {
+		t.searchNavigate(-1)
+	}
+	for {
+		ev, ok := t.SearchEditor.Update(gtx)
+		if !ok {
+			break
+		}
+		if _, ok := ev.(widget.SubmitEvent); ok {
+			t.performSearch()
+			t.searchNavigate(1)
+		}
+	}
+	if t.SearchOpen && t.SearchEditor.Text() != t.searchQuery {
+		t.performSearch()
 	}
 
 	for t.MethodBtn.Clicked(gtx) {
@@ -580,9 +724,18 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 	}
 
 	if t.CopyBtn.Clicked(gtx) {
+		var reader io.ReadCloser
+		if t.respFilePath != "" {
+			if f, err := os.Open(t.respFilePath); err == nil {
+				reader = f
+			}
+		}
+		if reader == nil {
+			reader = io.NopCloser(strings.NewReader(strings.Join(t.RespLines, "\n")))
+		}
 		gtx.Execute(clipboard.WriteCmd{
 			Type: "application/text",
-			Data: io.NopCloser(strings.NewReader(strings.Join(t.RespLines, "\n"))),
+			Data: reader,
 		})
 	}
 
@@ -590,7 +743,9 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 		t.saveToCollection()
 	}
 
-	t.checkDirty()
+	if t.LinkedNode != nil {
+		t.checkDirty()
+	}
 
 	contentType := "none"
 	for _, h := range t.Headers {
@@ -640,6 +795,12 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 	if minReqRatio > maxReqRatio {
 		minReqRatio = 0.5
 		maxReqRatio = 0.5
+	}
+
+	if t.SplitRatio < minReqRatio {
+		t.SplitRatio = minReqRatio
+	} else if t.SplitRatio > maxReqRatio {
+		t.SplitRatio = maxReqRatio
 	}
 
 	if moved && flexWidth > 0 {
@@ -736,14 +897,106 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 						if t.LinkedNode == nil {
 							return layout.Dimensions{}
 						}
-						return SquareBtn(gtx, &t.SaveToColBtn, iconSave, th)
+						iconColor := color.NRGBA{R: 80, G: 80, B: 80, A: 255}
+						if t.IsDirty {
+							iconColor = th.Palette.ContrastBg
+						}
+						size := gtx.Dp(unit.Dp(30))
+						gtx.Constraints.Min = image.Point{X: size, Y: size}
+						gtx.Constraints.Max = gtx.Constraints.Min
+						return t.SaveToColBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							rect := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 2)
+							paint.FillShape(gtx.Ops, color.NRGBA{R: 49, G: 49, B: 49, A: 255}, rect.Op(gtx.Ops))
+							return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								s := gtx.Dp(unit.Dp(18))
+								gtx.Constraints.Min = image.Point{X: s, Y: s}
+								return iconSave.Layout(gtx, iconColor)
+							})
+						})
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(th, &t.SendBtn, "SEND")
-						btn.TextSize = unit.Sp(12)
-						btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}
-						return btn.Layout(gtx)
+						btnMinW := gtx.Dp(unit.Dp(90))
+						if t.IsRequesting {
+							gtx.Constraints.Min.X = btnMinW
+							btn := material.Button(th, &t.CancelBtn, "CANCEL")
+							btn.Background = color.NRGBA{R: 180, G: 40, B: 40, A: 255}
+							btn.TextSize = unit.Sp(12)
+							btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(16), Right: unit.Dp(16)}
+							return btn.Layout(gtx)
+						}
+
+						bgColor := th.Palette.ContrastBg
+						cornerR := gtx.Dp(unit.Dp(4))
+						gtx.Constraints.Min.X = btnMinW
+
+						sendMacro := op.Record(gtx.Ops)
+						sendDims := layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return material.Clickable(gtx, &t.SendBtn, func(gtx layout.Context) layout.Dimensions {
+									return layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(16), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Label(th, unit.Sp(12), "SEND")
+										lbl.Color = th.Palette.ContrastFg
+										return lbl.Layout(gtx)
+									})
+								})
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								h := gtx.Dp(unit.Dp(18))
+								w := gtx.Dp(unit.Dp(1))
+								paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 60}, clip.Rect{Max: image.Pt(w, h)}.Op())
+								return layout.Dimensions{Size: image.Pt(w, h)}
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return material.Clickable(gtx, &t.SendMenuBtn, func(gtx layout.Context) layout.Dimensions {
+									return layout.Inset{Top: unit.Dp(3), Bottom: unit.Dp(3), Left: unit.Dp(0), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										is := gtx.Dp(unit.Dp(20))
+										gtx.Constraints.Min = image.Point{X: is, Y: is}
+										gtx.Constraints.Max = gtx.Constraints.Min
+										return iconDropDown.Layout(gtx, th.Palette.ContrastFg)
+									})
+								})
+							}),
+						)
+						sendCall := sendMacro.Stop()
+
+						sz := sendDims.Size
+						paint.FillShape(gtx.Ops, bgColor, clip.UniformRRect(image.Rectangle{Max: sz}, cornerR).Op(gtx.Ops))
+						sendCall.Add(gtx.Ops)
+
+						if t.SendMenuOpen {
+							macro := op.Record(gtx.Ops)
+
+							menuGtx := gtx
+							menuGtx.Constraints.Min = image.Point{}
+							menuGtx.Constraints.Max = image.Pt(gtx.Dp(unit.Dp(160)), gtx.Dp(unit.Dp(100)))
+
+							rec := op.Record(gtx.Ops)
+							menuDims := layout.UniformInset(unit.Dp(4)).Layout(menuGtx, func(gtx layout.Context) layout.Dimensions {
+								return material.Clickable(gtx, &t.SaveToFileBtn, func(gtx layout.Context) layout.Dimensions {
+									return layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(10), Right: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										gtx.Constraints.Min.X = gtx.Dp(unit.Dp(130))
+										lbl := material.Label(th, unit.Sp(12), "Save to file...")
+										return lbl.Layout(gtx)
+									})
+								})
+							})
+							menuCall := rec.Stop()
+
+							msz := menuDims.Size
+							menuX := sz.X - msz.X
+							op.Offset(image.Pt(menuX, sz.Y+gtx.Dp(unit.Dp(2)))).Add(gtx.Ops)
+
+							paint.FillShape(gtx.Ops, color.NRGBA{R: 35, G: 35, B: 35, A: 255}, clip.UniformRRect(image.Rectangle{Max: msz}, 4).Op(gtx.Ops))
+							b := max(1, gtx.Dp(unit.Dp(1)))
+							paint.FillShape(gtx.Ops, color.NRGBA{R: 60, G: 60, B: 60, A: 255}, clip.Stroke{Path: clip.UniformRRect(image.Rectangle{Max: msz}, 4).Path(gtx.Ops), Width: float32(b)}.Op())
+							menuCall.Add(gtx.Ops)
+
+							call := macro.Stop()
+							op.Defer(gtx.Ops, call)
+						}
+
+						return sendDims
 					}),
 				)
 			})
@@ -810,41 +1063,44 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 										return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 											return material.List(th, &t.HeadersList).Layout(gtx, len(visibleHeaders), func(gtx layout.Context, i int) layout.Dimensions {
 												h := visibleHeaders[i]
-												return layout.Stack{}.Layout(gtx,
-													layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-														if i < len(visibleHeaders)-1 {
-															rect := clip.Rect{Min: image.Point{0, gtx.Constraints.Min.Y - gtx.Dp(unit.Dp(1))}, Max: gtx.Constraints.Min}.Op()
-															paint.FillShape(gtx.Ops, color.NRGBA{R: 43, G: 45, B: 49, A: 255}, rect)
-														}
-														return layout.Dimensions{Size: gtx.Constraints.Min}
-													}),
-													layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-														return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+												return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+													layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+														return layout.Inset{Left: unit.Dp(2), Right: unit.Dp(2), Top: unit.Dp(1), Bottom: unit.Dp(1)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 															return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-																layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-																	return TextFieldOverlay(gtx, th, &h.Key, "Header Key", false, activeEnv, 0, unit.Sp(12))
+																layout.Flexed(t.HeaderSplitRatio, func(gtx layout.Context) layout.Dimensions {
+																	return TextFieldOverlay(gtx, th, &h.Key, "Key", false, activeEnv, 0, unit.Sp(11))
 																}),
-																layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
-																layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-																	return TextFieldOverlay(gtx, th, &h.Value, "Header Value", false, activeEnv, 0, unit.Sp(12))
+																layout.Rigid(layout.Spacer{Width: unit.Dp(2)}.Layout),
+																layout.Flexed(1-t.HeaderSplitRatio, func(gtx layout.Context) layout.Dimensions {
+																	return TextFieldOverlay(gtx, th, &h.Value, "Value", false, activeEnv, 0, unit.Sp(11))
 																}),
-																layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+																layout.Rigid(layout.Spacer{Width: unit.Dp(2)}.Layout),
 																layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-																	size := gtx.Dp(26)
-																	gtx.Constraints.Min = image.Point{X: size, Y: size}
-																	gtx.Constraints.Max = image.Point{X: size, Y: size}
+																	bw := gtx.Dp(unit.Dp(20))
+																	bh := gtx.Dp(unit.Dp(28))
+																	gtx.Constraints.Min = image.Point{X: bw, Y: bh}
+																	gtx.Constraints.Max = image.Point{X: bw, Y: bh}
 																	return h.DelBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-																		rect := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 2)
+																		sz := gtx.Constraints.Min
+																		rect := clip.UniformRRect(image.Rectangle{Max: sz}, 2)
 																		paint.FillShape(gtx.Ops, color.NRGBA{R: 194, G: 64, B: 56, A: 255}, rect.Op(gtx.Ops))
 																		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-																			l := material.Label(th, unit.Sp(10), "X")
-																			l.Color = th.Palette.ContrastFg
-																			return l.Layout(gtx)
+																			is := gtx.Dp(unit.Dp(14))
+																			gtx.Constraints.Min = image.Point{X: is, Y: is}
+																			return iconClose.Layout(gtx, th.Palette.ContrastFg)
 																		})
 																	})
 																}),
 															)
 														})
+													}),
+																									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+														if i >= len(visibleHeaders)-1 {
+															return layout.Dimensions{}
+														}
+														size := image.Point{X: gtx.Constraints.Max.X, Y: gtx.Dp(unit.Dp(1))}
+														paint.FillShape(gtx.Ops, color.NRGBA{R: 43, G: 45, B: 49, A: 255}, clip.Rect{Max: size}.Op())
+														return layout.Dimensions{Size: size}
 													}),
 												)
 											})
@@ -858,16 +1114,53 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 										paint.FillShape(gtx.Ops, color.NRGBA{R: 43, G: 45, B: 49, A: 255}, clip.Rect{Max: size}.Op())
 										return layout.Dimensions{Size: size}
 									}),
-									layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-										return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-											frozenReqWidth := 0
-											if isDragging && t.LastReqWidth > 0 {
-												frozenReqWidth = t.LastReqWidth
-											} else {
-												t.LastReqWidth = gtx.Constraints.Max.X
-											}
-											return TextFieldOverlay(gtx, th, &t.ReqEditor, "Request Body", false, activeEnv, frozenReqWidth, unit.Sp(13))
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										return layout.Inset{Left: unit.Dp(2), Right: unit.Dp(2), Top: unit.Dp(2), Bottom: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+												return SquareBtn(gtx, &t.ReqWrapBtn, iconWrap, th)
+											})
 										})
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										size := image.Point{X: gtx.Constraints.Max.X, Y: gtx.Dp(unit.Dp(1))}
+										paint.FillShape(gtx.Ops, color.NRGBA{R: 43, G: 45, B: 49, A: 255}, clip.Rect{Max: size}.Op())
+										return layout.Dimensions{Size: size}
+									}),
+									layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+										bdr := gtx.Dp(unit.Dp(2))
+										sz := gtx.Constraints.Max
+										paint.FillShape(gtx.Ops, color.NRGBA{R: 43, G: 45, B: 49, A: 255}, clip.Rect{Max: sz}.Op())
+										inner := image.Rect(bdr, bdr, sz.X-bdr, sz.Y-bdr)
+										paint.FillShape(gtx.Ops, color.NRGBA{R: 49, G: 49, B: 49, A: 255}, clip.Rect(inner).Op())
+										gtx.Constraints.Min = image.Pt(inner.Dx(), inner.Dy())
+										gtx.Constraints.Max = gtx.Constraints.Min
+										op.Offset(image.Pt(bdr, bdr)).Add(gtx.Ops)
+										t.ReqEditor.Submit = false
+										if !t.ReqWrapEnabled {
+											t.ReqListH.Axis = layout.Horizontal
+											return material.List(th, &t.ReqListH).Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
+												edGtx := gtx
+												edGtx.Constraints.Max.X = 10000000
+												edGtx.Constraints.Min.Y = gtx.Constraints.Max.Y
+												edGtx.Constraints.Max.Y = gtx.Constraints.Max.Y
+												ed := material.Editor(th, &t.ReqEditor, "Request Body")
+												ed.TextSize = unit.Sp(13)
+												ed.Font = font.Font{Typeface: "Ubuntu Mono"}
+												return ed.Layout(edGtx)
+											})
+										}
+										edGtx := gtx
+										if isDragging && t.LastReqWidth > 0 {
+											edGtx.Constraints.Max.X = t.LastReqWidth
+											edGtx.Constraints.Min.X = t.LastReqWidth
+										} else {
+											t.LastReqWidth = gtx.Constraints.Max.X
+										}
+										ed := material.Editor(th, &t.ReqEditor, "Request Body")
+										ed.TextSize = unit.Sp(13)
+										ed.Font = font.Font{Typeface: "Ubuntu Mono"}
+										ed.Layout(edGtx)
+										return layout.Dimensions{Size: gtx.Constraints.Max}
 									}),
 								)
 							})
@@ -897,15 +1190,95 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 										return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 											return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 												layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-													lbl := material.Label(th, unit.Sp(12), t.Status)
+													statusText := t.Status
+													if t.IsRequesting {
+														dl := t.downloadedBytes.Load()
+														if dl > 0 {
+															statusText = fmt.Sprintf("Downloading... %s", formatSize(dl))
+														}
+													}
+													lbl := material.Label(th, unit.Sp(12), statusText)
 													return lbl.Layout(gtx)
 												}),
 												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-													return SquareBtn(gtx, &t.WrapBtn, iconWrap, th)
+													if t.SaveToFilePath != "" && !t.PreviewEnabled {
+														return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+															layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+																btn := material.Button(th, &t.OpenFileBtn, "Open")
+																btn.TextSize = unit.Sp(10)
+																btn.Inset = layout.Inset{Top: unit.Dp(3), Bottom: unit.Dp(3), Left: unit.Dp(8), Right: unit.Dp(8)}
+																return btn.Layout(gtx)
+															}),
+															layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+															layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+																btn := material.Button(th, &t.PropertiesBtn, "Location")
+																btn.TextSize = unit.Sp(10)
+																btn.Background = color.NRGBA{R: 55, G: 55, B: 55, A: 255}
+																btn.Inset = layout.Inset{Top: unit.Dp(3), Bottom: unit.Dp(3), Left: unit.Dp(8), Right: unit.Dp(8)}
+																return btn.Layout(gtx)
+															}),
+														)
+													}
+													return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+														layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+															return SquareBtn(gtx, &t.SearchBtn, iconSearch, th)
+														}),
+														layout.Rigid(layout.Spacer{Width: unit.Dp(2)}.Layout),
+														layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+															return SquareBtn(gtx, &t.WrapBtn, iconWrap, th)
+														}),
+														layout.Rigid(layout.Spacer{Width: unit.Dp(2)}.Layout),
+														layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+															return SquareBtn(gtx, &t.CopyBtn, iconCopy, th)
+														}),
+													)
 												}),
-												layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+											)
+										})
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if !t.SearchOpen {
+											return layout.Dimensions{}
+										}
+										return layout.Inset{Left: unit.Dp(4), Right: unit.Dp(4), Top: unit.Dp(2), Bottom: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+												layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+													return TextField(gtx, th, &t.SearchEditor, "Search...", true, 0, unit.Sp(11))
+												}),
+												layout.Rigid(layout.Spacer{Width: unit.Dp(2)}.Layout),
 												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-													return SquareBtn(gtx, &t.CopyBtn, iconCopy, th)
+													lbl := material.Label(th, unit.Sp(10), fmt.Sprintf("%d/%d", func() int {
+														if len(t.searchResults) > 0 {
+															return t.searchCurrent + 1
+														}
+														return 0
+													}(), len(t.searchResults)))
+													lbl.Color = color.NRGBA{R: 140, G: 140, B: 140, A: 255}
+													return lbl.Layout(gtx)
+												}),
+												layout.Rigid(layout.Spacer{Width: unit.Dp(2)}.Layout),
+												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+													btn := material.Button(th, &t.SearchPrevBtn, "▲")
+													btn.TextSize = unit.Sp(8)
+													btn.Background = color.NRGBA{R: 55, G: 55, B: 55, A: 255}
+													btn.Inset = layout.UniformInset(unit.Dp(4))
+													return btn.Layout(gtx)
+												}),
+												layout.Rigid(layout.Spacer{Width: unit.Dp(2)}.Layout),
+												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+													btn := material.Button(th, &t.SearchNextBtn, "▼")
+													btn.TextSize = unit.Sp(8)
+													btn.Background = color.NRGBA{R: 55, G: 55, B: 55, A: 255}
+													btn.Inset = layout.UniformInset(unit.Dp(4))
+													return btn.Layout(gtx)
+												}),
+												layout.Rigid(layout.Spacer{Width: unit.Dp(2)}.Layout),
+												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+													btn := material.Button(th, &t.SearchCloseBtn, "✕")
+													btn.TextSize = unit.Sp(8)
+													btn.Background = color.NRGBA{R: 55, G: 55, B: 55, A: 255}
+													btn.Inset = layout.UniformInset(unit.Dp(4))
+													return btn.Layout(gtx)
 												}),
 											)
 										})
@@ -916,7 +1289,45 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 										return layout.Dimensions{Size: size}
 									}),
 									layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-										return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+											layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+										return func(gtx layout.Context) layout.Dimensions {
+											if !t.PreviewEnabled && !t.IsRequesting && t.RespSize > 0 {
+												return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+													return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+														layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+															msg := fmt.Sprintf("Response saved to file (%s)", formatSize(t.RespSize))
+															if t.SaveToFilePath != "" {
+																msg += "\n" + filepath.Base(t.SaveToFilePath)
+															}
+															lbl := material.Label(th, unit.Sp(13), msg)
+															lbl.Alignment = text.Middle
+															lbl.Color = color.NRGBA{R: 170, G: 170, B: 170, A: 255}
+															return lbl.Layout(gtx)
+														}),
+														layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+														layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+															if t.respFilePath == "" {
+																return layout.Dimensions{}
+															}
+															btn := material.Button(th, &t.ShowPreviewBtn, "Show in app")
+															btn.TextSize = unit.Sp(12)
+															btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(16), Right: unit.Dp(16)}
+															return btn.Layout(gtx)
+														}),
+													)
+												})
+											}
+
+											bdr := gtx.Dp(unit.Dp(2))
+											rsz := gtx.Constraints.Max
+											paint.FillShape(gtx.Ops, color.NRGBA{R: 43, G: 45, B: 49, A: 255}, clip.Rect{Max: rsz}.Op())
+											rInner := image.Rect(bdr, bdr, rsz.X-bdr, rsz.Y-bdr)
+											paint.FillShape(gtx.Ops, color.NRGBA{R: 49, G: 49, B: 49, A: 255}, clip.Rect(rInner).Op())
+											op.Offset(image.Pt(bdr, bdr)).Add(gtx.Ops)
+											gtx.Constraints.Min = image.Pt(rInner.Dx(), rInner.Dy())
+											gtx.Constraints.Max = gtx.Constraints.Min
+
 											return layout.Stack{}.Layout(gtx,
 												layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 													var dims layout.Dimensions
@@ -930,6 +1341,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 															edGtx.Constraints.Max.Y = gtx.Constraints.Max.Y
 															ed := material.Editor(th, &t.RespEditor, "")
 															ed.TextSize = unit.Sp(13)
+															ed.Font = font.Font{Typeface: "Ubuntu Mono"}
 															return ed.Layout(edGtx)
 														})
 													} else {
@@ -942,6 +1354,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 														}
 														ed := material.Editor(th, &t.RespEditor, "")
 														ed.TextSize = unit.Sp(13)
+														ed.Font = font.Font{Typeface: "Ubuntu Mono"}
 														ed.Layout(edGtx)
 
 														cl := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
@@ -1032,103 +1445,375 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 													return layout.Dimensions{}
 												}),
 											)
+										}(gtx)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if !t.PreviewEnabled || t.previewLoaded == 0 || t.previewLoaded >= t.RespSize {
+											return layout.Dimensions{}
+										}
+										return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+												remaining := t.RespSize - t.previewLoaded
+												label := fmt.Sprintf("Load more (%s remaining)", formatSize(remaining))
+												btn := material.Button(th, &t.LoadMoreBtn, label)
+												btn.TextSize = unit.Sp(11)
+												btn.Background = color.NRGBA{R: 50, G: 50, B: 50, A: 255}
+												btn.Inset = layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(12), Right: unit.Dp(12)}
+												return btn.Layout(gtx)
+											})
 										})
 									}),
 								)
-							})
-						})
-					}),
-				)
-			})
-		}),
+							}),
+						)
+					})
+				})
+			}),
+		)
+	})
+}),
 	)
 }
 
-func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
+func formatSize(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.2f GB", float64(n)/float64(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+func (t *RequestTab) cancelRequest() {
+	if t.cancelFunc != nil {
+		t.cancelFunc()
+		t.cancelFunc = nil
+	}
+}
+
+func (t *RequestTab) cleanupRespFile() {
+	if t.respFilePath != "" {
+		os.Remove(t.respFilePath)
+		t.respFilePath = ""
+	}
+}
+
+func (t *RequestTab) prepareRequest(env map[string]string) (*http.Request, context.Context, context.CancelFunc, error) {
 	urlRaw := strings.ReplaceAll(t.URLInput.Text(), "\n", "")
 	urlRaw = strings.TrimSpace(utils.SanitizeText(urlRaw))
 	url := processTemplate(urlRaw, env)
 
 	if url == "" {
-		return
+		return nil, nil, nil, fmt.Errorf("empty URL")
 	}
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		url = "http://" + url
 	}
 
-	reqBody := processTemplate(t.ReqEditor.Text(), env)
+	reqBody := t.ReqEditor.Text()
+	reqBody = strings.ReplaceAll(reqBody, "\u2003", "\t")
+	reqBody = strings.ReplaceAll(reqBody, "\uFEFF", "")
+	reqBody = processTemplate(reqBody, env)
 	strippedBody := utils.StripJSONComments(reqBody)
-
 	if json.Valid([]byte(strippedBody)) {
 		reqBody = strippedBody
 	}
 
-	t.Status = "Sending..."
-	t.RespLines = []string{}
-
-	req, err := http.NewRequest(t.Method, url, strings.NewReader(reqBody))
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, t.Method, url, strings.NewReader(reqBody))
 	if err != nil {
-		t.Status = "Error: " + err.Error()
-		win.Invalidate()
-		return
+		cancel()
+		return nil, nil, nil, err
 	}
 
 	t.updateSystemHeaders()
-
 	for _, h := range t.Headers {
-		k := utils.SanitizeText(h.Key.Text())
-		k = strings.ReplaceAll(k, "\n", "")
-		k = strings.TrimSpace(k)
+		k := strings.TrimSpace(strings.ReplaceAll(utils.SanitizeText(h.Key.Text()), "\n", ""))
+		v := strings.TrimSpace(strings.ReplaceAll(utils.SanitizeText(h.Value.Text()), "\n", ""))
 		k = processTemplate(k, env)
-
-		vRaw := utils.SanitizeText(h.Value.Text())
-		vRaw = strings.ReplaceAll(vRaw, "\n", "")
-		vRaw = strings.TrimSpace(vRaw)
-
-		v := processTemplate(vRaw, env)
+		v = processTemplate(v, env)
 		if k != "" {
 			req.Header.Add(k, v)
 		}
 	}
+	return req, ctx, cancel, nil
+}
+
+func (t *RequestTab) beginRequest() {
+	t.cancelRequest()
+	t.Status = "Sending..."
+	t.RespLines = []string{}
+	t.IsRequesting = true
+	t.RespSize = 0
+	t.downloadedBytes.Store(0)
+	t.cleanupRespFile()
+	t.PreviewEnabled = true
+	t.SaveToFilePath = ""
+	t.previewLoaded = 0
+}
+
+func (t *RequestTab) sendResult(status, body string) {
+	select {
+	case <-t.ResponseChan:
+	default:
+	}
+	t.ResponseChan <- [2]string{status, body}
+}
+
+func (t *RequestTab) streamResponse(ctx context.Context, body io.Reader, dest io.Writer, win *app.Window) (int64, error) {
+	buf := make([]byte, 256*1024)
+	var total int64
+	lastUpdate := time.Now()
+	for {
+		n, readErr := body.Read(buf)
+		if n > 0 {
+			if _, wErr := dest.Write(buf[:n]); wErr != nil {
+				return total, wErr
+			}
+			total += int64(n)
+			t.downloadedBytes.Store(total)
+			if time.Since(lastUpdate) > 100*time.Millisecond {
+				lastUpdate = time.Now()
+				win.Invalidate()
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF && ctx.Err() == context.Canceled {
+				return total, ctx.Err()
+			}
+			break
+		}
+	}
+	return total, nil
+}
+
+const previewBatchSize = 5 * 1024 * 1024
+
+func (t *RequestTab) loadPreviewFromFile(path string, totalSize int64) string {
+	readSize := totalSize
+	if readSize > previewBatchSize {
+		readSize = previewBatchSize
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	data := make([]byte, readSize)
+	n, _ := io.ReadFull(f, data)
+	data = data[:n]
+
+	var display string
+	if json.Valid(data) && totalSize <= previewBatchSize {
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, data, "", "  "); err == nil {
+			display = buf.String()
+		} else {
+			display = string(data)
+		}
+	} else {
+		display = string(data)
+	}
+	display = utils.SanitizeText(display)
+	t.previewLoaded = int64(n)
+	return display
+}
+
+func (t *RequestTab) loadMorePreview() {
+	if t.respFilePath == "" || t.previewLoaded >= t.RespSize {
+		return
+	}
+	f, err := os.Open(t.respFilePath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Seek(t.previewLoaded, io.SeekStart)
+
+	readSize := t.RespSize - t.previewLoaded
+	if readSize > previewBatchSize {
+		readSize = previewBatchSize
+	}
+	data := make([]byte, readSize)
+	n, _ := io.ReadFull(f, data)
+	data = data[:n]
+
+	extra := utils.SanitizeText(string(data))
+	t.previewLoaded += int64(n)
+
+	current := t.RespEditor.Text()
+	t.RespEditor.SetText(current + extra)
+	t.RespLines = strings.Split(t.RespEditor.Text(), "\n")
+}
+
+func openFile(path string) {
+	switch runtime.GOOS {
+	case "windows":
+		exec.Command("cmd", "/c", "start", "", path).Start()
+	case "darwin":
+		exec.Command("open", path).Start()
+	default:
+		exec.Command("xdg-open", path).Start()
+	}
+}
+
+func openFileInExplorer(path string) {
+	switch runtime.GOOS {
+	case "windows":
+		exec.Command("explorer", "/select,", filepath.ToSlash(path)).Start()
+	case "darwin":
+		exec.Command("open", "-R", path).Start()
+	default:
+		dir := filepath.Dir(path)
+		exec.Command("xdg-open", dir).Start()
+	}
+}
+
+func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
+	t.beginRequest()
+
+	req, ctx, cancel, err := t.prepareRequest(env)
+	if err != nil {
+		t.Status = "Error: " + err.Error()
+		t.IsRequesting = false
+		win.Invalidate()
+		return
+	}
+	t.cancelFunc = cancel
 
 	go func() {
+		defer func() {
+			t.IsRequesting = false
+			t.cancelFunc = nil
+			win.Invalidate()
+		}()
+
 		start := time.Now()
 		resp, err := httpClient.Do(req)
-		duration := time.Since(start)
-
 		if err != nil {
-			select {
-			case <-t.ResponseChan:
-			default:
+			status := "Error: " + err.Error()
+			if ctx.Err() == context.Canceled {
+				status = "Cancelled"
 			}
-			t.ResponseChan <- [2]string{"Error: " + err.Error(), ""}
+			t.sendResult(status, "")
 			win.Invalidate()
 			return
 		}
 		defer resp.Body.Close()
 
-		limit := int64(15 * 1024 * 1024)
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
+		tmpFile, err := os.CreateTemp("", "tracto-resp-*.tmp")
+		if err != nil {
+			t.sendResult("Error: "+err.Error(), "")
+			win.Invalidate()
+			return
+		}
+		tmpPath := tmpFile.Name()
 
-		var finalData string
-		if json.Valid(body) {
-			var prettyJSON bytes.Buffer
-			if err := json.Indent(&prettyJSON, body, "", "  "); err == nil {
-				finalData = prettyJSON.String()
-			} else {
-				finalData = string(body)
+		total, sErr := t.streamResponse(ctx, resp.Body, tmpFile, win)
+		tmpFile.Close()
+
+		if sErr != nil {
+			os.Remove(tmpPath)
+			status := "Error: " + sErr.Error()
+			if ctx.Err() == context.Canceled {
+				status = "Cancelled"
 			}
-		} else {
-			finalData = string(body)
+			t.sendResult(status, "")
+			win.Invalidate()
+			return
 		}
+		duration := time.Since(start)
+		t.RespSize = total
+		t.respFilePath = tmpPath
 
-		finalData = utils.SanitizeText(finalData)
-
-		select {
-		case <-t.ResponseChan:
-		default:
-		}
-		t.ResponseChan <- [2]string{resp.Status + " " + duration.String(), finalData}
+		display := t.loadPreviewFromFile(tmpPath, total)
+		statusText := fmt.Sprintf("%s  %s  %s", resp.Status, duration.Round(time.Millisecond), formatSize(total))
+		t.sendResult(statusText, display)
 		win.Invalidate()
 	}()
+}
+
+func (t *RequestTab) executeRequestToFile(win *app.Window, env map[string]string, dest io.WriteCloser) {
+	t.beginRequest()
+	t.PreviewEnabled = false
+
+	req, ctx, cancel, err := t.prepareRequest(env)
+	if err != nil {
+		t.Status = "Error: " + err.Error()
+		t.IsRequesting = false
+		dest.Close()
+		win.Invalidate()
+		return
+	}
+	t.cancelFunc = cancel
+
+	go func() {
+		defer func() {
+			dest.Close()
+			t.IsRequesting = false
+			t.cancelFunc = nil
+			win.Invalidate()
+		}()
+
+		start := time.Now()
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			status := "Error: " + err.Error()
+			if ctx.Err() == context.Canceled {
+				status = "Cancelled"
+			}
+			t.sendResult(status, "")
+			win.Invalidate()
+			return
+		}
+		defer resp.Body.Close()
+
+		tmpFile, tmpErr := os.CreateTemp("", "tracto-resp-*.tmp")
+		var writer io.Writer = dest
+		if tmpErr == nil {
+			writer = io.MultiWriter(dest, tmpFile)
+		}
+
+		total, sErr := t.streamResponse(ctx, resp.Body, writer, win)
+
+		if tmpFile != nil {
+			tmpFile.Close()
+			if sErr != nil {
+				os.Remove(tmpFile.Name())
+			} else {
+				t.respFilePath = tmpFile.Name()
+			}
+		}
+
+		if sErr != nil {
+			status := "Error: " + sErr.Error()
+			if ctx.Err() == context.Canceled {
+				status = "Cancelled"
+			}
+			t.sendResult(status, "")
+			win.Invalidate()
+			return
+		}
+
+		duration := time.Since(start)
+		t.RespSize = total
+		statusText := fmt.Sprintf("%s  %s  %s  Saved to file", resp.Status, duration.Round(time.Millisecond), formatSize(total))
+		t.sendResult(statusText, "")
+		win.Invalidate()
+	}()
+}
+
+func (t *RequestTab) loadPreviewForSavedFile() {
+	if t.respFilePath == "" || t.RespSize == 0 {
+		return
+	}
+	display := t.loadPreviewFromFile(t.respFilePath, t.RespSize)
+	t.RespLines = strings.Split(display, "\n")
+	t.RespEditor.SetText(display)
+	t.PreviewEnabled = true
 }
