@@ -3,8 +3,8 @@ module tracto
 go 1.25.5
 
 require (
-	github.com/nanorele/gio v1.0.3
-	github.com/nanorele/gio-x v1.0.3
+	github.com/nanorele/gio v1.0.5
+	github.com/nanorele/gio-x v1.0.5
 	golang.org/x/exp/shiny v0.0.0-20250408133849-7e4ce0ab07d0
 	golang.org/x/image v0.26.0
 )

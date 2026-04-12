@@ -181,7 +181,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	th.Shaper.LayoutString(text.Parameters{
 		Font:     monoFont,
 		PxPerEm:  fixed.I(gtx.Sp(textSize)),
-		MaxWidth: gtx.Constraints.Max.X,
+		MaxWidth: 1 << 24,
 		Locale:   gtx.Locale,
 	}, "A")
 
@@ -198,12 +198,38 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 
 	extY := gtx.Dp(unit.Dp(2))
 	offsetY := gtx.Dp(unit.Dp(1))
-	topY := -extY + offsetY
-	bottomY := lineHeight + extY + offsetY
+
+	// Measure actual line spacing by laying out two lines
+	th.Shaper.LayoutString(text.Parameters{
+		Font:    monoFont,
+		PxPerEm: fixed.I(gtx.Sp(textSize)),
+		MaxWidth: 1 << 24,
+		Locale:  gtx.Locale,
+	}, "A\nA")
+	var firstY, lastY int32
+	firstGlyph := true
+	for {
+		g, ok := th.Shaper.NextGlyph()
+		if !ok {
+			break
+		}
+		if firstGlyph {
+			firstY = g.Y
+			firstGlyph = false
+		}
+		lastY = g.Y
+	}
+	lineSpacing := int(lastY - firstY)
+	if lineSpacing <= 0 {
+		lineSpacing = int(float64(lineHeight) * 1.2)
+	}
+
+	numLines := strings.Count(textStr, "\n") + 1
+	totalHeight := numLines*lineSpacing + lineHeight
 
 	cl := clip.Rect{
-		Min: image.Pt(0, topY),
-		Max: image.Pt(edGtx.Constraints.Max.X, bottomY),
+		Min: image.Pt(0, -extY+offsetY),
+		Max: image.Pt(edGtx.Constraints.Max.X, totalHeight+extY+offsetY),
 	}.Push(gtx.Ops)
 
 	searchStr := textStr
@@ -223,10 +249,13 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 		absoluteStart := offset + start
 		absoluteEnd := offset + end
 
-		prefix := textStr[:absoluteStart]
+		// Find which line the variable is on and its position within that line
+		lineIndex := strings.Count(textStr[:absoluteStart], "\n")
+		lineStart := strings.LastIndex(textStr[:absoluteStart], "\n") + 1
+		linePrefix := textStr[lineStart:absoluteStart]
 		varText := textStr[absoluteStart:absoluteEnd]
 
-		pWidth := measureTextWidth(gtx, th, textSize, monoFont, prefix)
+		pWidth := measureTextWidth(gtx, th, textSize, monoFont, linePrefix)
 		vWidth := measureTextWidth(gtx, th, textSize, monoFont, varText)
 
 		bgColor := color.NRGBA{R: 130, G: 60, B: 60, A: 100}
@@ -234,11 +263,14 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 			bgColor = color.NRGBA{R: 40, G: 110, B: 160, A: 100}
 		}
 
+		yOff := lineIndex * lineSpacing
 		x1 := pWidth - scrollX
 		x2 := x1 + vWidth
+		varTopY := -extY + offsetY + yOff
+		varBottomY := lineHeight + extY + offsetY + yOff
 
 		if x2 > 0 && x1 < edGtx.Constraints.Max.X {
-			rect := image.Rect(x1, topY, x2, bottomY)
+			rect := image.Rect(x1, varTopY, x2, varBottomY)
 			paint.FillShape(gtx.Ops, bgColor, clip.UniformRRect(rect, gtx.Dp(unit.Dp(3))).Op(gtx.Ops))
 		}
 

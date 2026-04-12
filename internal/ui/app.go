@@ -107,7 +107,7 @@ func measureTextWidth(gtx layout.Context, th *material.Theme, size unit.Sp, fnt 
 	th.Shaper.LayoutString(text.Parameters{
 		Font:     fnt,
 		PxPerEm:  fixed.I(gtx.Sp(size)),
-		MaxWidth: gtx.Constraints.Max.X,
+		MaxWidth: 1 << 24,
 		Locale:   gtx.Locale,
 	}, str)
 
