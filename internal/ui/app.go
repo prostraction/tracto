@@ -103,6 +103,12 @@ type AppUI struct {
 
 	RenamingNode  *CollectionNode
 
+	TabCtxMenuOpen    bool
+	TabCtxMenuIdx     int
+	TabCtxClose       widget.Clickable
+	TabCtxCloseOthers widget.Clickable
+	TabCtxCloseAll    widget.Clickable
+
 	tabWidthCache map[*RequestTab]cachedTab
 }
 
@@ -348,6 +354,15 @@ func (ui *AppUI) saveState() {
 }
 
 func (ui *AppUI) openRequestInTab(node *CollectionNode) {
+	// If tab for this node is already open, switch to it
+	for i, t := range ui.Tabs {
+		if t.LinkedNode == node {
+			ui.ActiveIdx = i
+			ui.Window.Invalidate()
+			return
+		}
+	}
+
 	tab := NewRequestTab(node.Name)
 	tab.LinkedNode = node
 	req := node.Request
@@ -1325,8 +1340,46 @@ func (ui *AppUI) layoutEnvEditor(gtx layout.Context) layout.Dimensions {
 	})
 }
 
+func (ui *AppUI) closeTab(idx int) {
+	if idx < 0 || idx >= len(ui.Tabs) {
+		return
+	}
+	delete(ui.tabWidthCache, ui.Tabs[idx])
+	ui.Tabs = append(ui.Tabs[:idx], ui.Tabs[idx+1:]...)
+	if ui.ActiveIdx >= idx && ui.ActiveIdx > 0 {
+		ui.ActiveIdx--
+	} else if ui.ActiveIdx >= len(ui.Tabs) {
+		ui.ActiveIdx = len(ui.Tabs) - 1
+	}
+	ui.saveState()
+}
+
 func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
+	// Global keyboard shortcuts: Ctrl+S save, Ctrl+W close tab
+	for {
+		ev, ok := gtx.Event(
+			key.Filter{Name: "S", Required: key.ModShortcut},
+			key.Filter{Name: "W", Required: key.ModShortcut},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(key.Event); ok && e.State == key.Press {
+			switch e.Name {
+			case "S":
+				if ui.ActiveIdx >= 0 && ui.ActiveIdx < len(ui.Tabs) {
+					ui.Tabs[ui.ActiveIdx].saveToCollection()
+				}
+			case "W":
+				if len(ui.Tabs) > 0 {
+					ui.closeTab(ui.ActiveIdx)
+				}
+			}
+		}
+	}
+
 	for ui.AddTabBtn.Clicked(gtx) {
+		ui.TabCtxMenuOpen = false
 		newTab := NewRequestTab("New request")
 		if len(ui.Tabs) > 0 && ui.ActiveIdx >= 0 && ui.ActiveIdx < len(ui.Tabs) {
 			newTab.SplitRatio = ui.Tabs[ui.ActiveIdx].SplitRatio
@@ -1336,19 +1389,36 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 	}
 
 	for i := len(ui.Tabs) - 1; i >= 0; i-- {
-		var clicked bool
 		for ui.Tabs[i].CloseBtn.Clicked(gtx) {
-			clicked = true
+			ui.TabCtxMenuOpen = false
+			ui.closeTab(i)
+			break
 		}
-		if clicked {
-			delete(ui.tabWidthCache, ui.Tabs[i])
-			ui.Tabs = append(ui.Tabs[:i], ui.Tabs[i+1:]...)
-			if ui.ActiveIdx >= i && ui.ActiveIdx > 0 {
-				ui.ActiveIdx--
-			} else if ui.ActiveIdx >= len(ui.Tabs) {
-				ui.ActiveIdx = len(ui.Tabs) - 1
+	}
+
+	// Tab context menu actions
+	for ui.TabCtxClose.Clicked(gtx) {
+		ui.closeTab(ui.TabCtxMenuIdx)
+		ui.TabCtxMenuOpen = false
+	}
+	for ui.TabCtxCloseOthers.Clicked(gtx) {
+		keep := ui.TabCtxMenuIdx
+		for i := len(ui.Tabs) - 1; i >= 0; i-- {
+			if i != keep {
+				ui.closeTab(i)
+				if i < keep {
+					keep--
+				}
 			}
 		}
+		ui.ActiveIdx = 0
+		ui.TabCtxMenuOpen = false
+	}
+	for ui.TabCtxCloseAll.Clicked(gtx) {
+		for i := len(ui.Tabs) - 1; i >= 0; i-- {
+			ui.closeTab(i)
+		}
+		ui.TabCtxMenuOpen = false
 	}
 
 	if len(ui.Tabs) == 0 {
@@ -1414,7 +1484,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 		ui.saveState()
 	}
 
-	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+	dims := layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			gtx.Constraints.Min.X = ui.SidebarWidth
 			gtx.Constraints.Max.X = ui.SidebarWidth
@@ -1552,6 +1622,23 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 										tab := ui.Tabs[idx]
 										if tab.TabBtn.Clicked(gtx) {
 											ui.ActiveIdx = idx
+											ui.TabCtxMenuOpen = false
+										}
+
+										// Right-click context menu
+										event.Op(gtx.Ops, tab)
+										for {
+											ev, ok := gtx.Event(pointer.Filter{
+												Target: tab,
+												Kinds:  pointer.Press,
+											})
+											if !ok {
+												break
+											}
+											if pe, ok := ev.(pointer.Event); ok && pe.Buttons.Contain(pointer.ButtonSecondary) {
+												ui.TabCtxMenuOpen = true
+												ui.TabCtxMenuIdx = idx
+											}
 										}
 
 										bgColor := color.NRGBA{R: 24, G: 24, B: 24, A: 255}
@@ -1582,6 +1669,9 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 																	cleanTitle = strings.ReplaceAll(cleanTitle, "\n", " ")
 																	if strings.TrimSpace(cleanTitle) == "" {
 																		cleanTitle = "New request"
+																	}
+																	if tab.IsDirty {
+																		cleanTitle = "● " + cleanTitle
 																	}
 																	lbl := material.Label(ui.Theme, unit.Sp(12), cleanTitle)
 																	lbl.Color = fgColor
@@ -1701,4 +1791,63 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 	)
+
+	// Tab context menu overlay
+	if ui.TabCtxMenuOpen {
+		macro := op.Record(gtx.Ops)
+		op.Offset(image.Pt(gtx.Dp(unit.Dp(80)), gtx.Dp(unit.Dp(30)))).Add(gtx.Ops)
+
+		menuItem := func(gtx layout.Context, clk *widget.Clickable, title string) layout.Dimensions {
+			return material.Clickable(gtx, clk, func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(140))
+					lbl := material.Label(ui.Theme, unit.Sp(12), title)
+					return lbl.Layout(gtx)
+				})
+			})
+		}
+
+		// Measure menu content
+		rec := op.Record(gtx.Ops)
+		menuGtx := gtx
+		menuGtx.Constraints.Min = image.Point{}
+		menuGtx.Constraints.Max = image.Pt(gtx.Dp(unit.Dp(200)), gtx.Dp(unit.Dp(300)))
+		menuDims := layout.UniformInset(unit.Dp(4)).Layout(menuGtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return menuItem(gtx, &ui.TabCtxClose, "Close")
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return menuItem(gtx, &ui.TabCtxCloseOthers, "Close others")
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return menuItem(gtx, &ui.TabCtxCloseAll, "Close all")
+				}),
+			)
+		})
+		menuCall := rec.Stop()
+
+		// Background + border using exact measured size
+		sz := menuDims.Size
+		b := 1
+		if gtx.Dp(unit.Dp(1)) > 1 {
+			b = gtx.Dp(unit.Dp(1))
+		}
+		// Border (slightly larger rect)
+		paint.FillShape(gtx.Ops, color.NRGBA{R: 60, G: 60, B: 60, A: 255},
+			clip.UniformRRect(image.Rectangle{Max: image.Pt(sz.X+b*2, sz.Y+b*2)}, 4).Op(gtx.Ops))
+		// Background
+		op.Offset(image.Pt(b, b)).Add(gtx.Ops)
+		paint.FillShape(gtx.Ops, color.NRGBA{R: 35, G: 35, B: 35, A: 255},
+			clip.UniformRRect(image.Rectangle{Max: sz}, 3).Op(gtx.Ops))
+		op.Offset(image.Pt(-b, -b)).Add(gtx.Ops)
+
+		// Replay menu content on top
+		menuCall.Add(gtx.Ops)
+
+		call := macro.Stop()
+		op.Defer(gtx.Ops, call)
+	}
+
+	return dims
 }

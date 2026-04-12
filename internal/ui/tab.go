@@ -112,6 +112,7 @@ type RequestTab struct {
 
 	LinkedNode   *CollectionNode
 	SaveToColBtn widget.Clickable
+	IsDirty      bool
 }
 
 func NewRequestTab(title string) *RequestTab {
@@ -130,6 +131,57 @@ func NewRequestTab(title string) *RequestTab {
 	t.HeadersList.Axis = layout.Vertical
 	t.RespListH.Axis = layout.Horizontal
 	return t
+}
+
+func (t *RequestTab) checkDirty() {
+	if t.LinkedNode == nil || t.LinkedNode.Request == nil {
+		t.IsDirty = false
+		return
+	}
+	req := t.LinkedNode.Request
+	if t.Method != req.Method || t.URLInput.Text() != req.URL || t.ReqEditor.Text() != req.Body {
+		t.IsDirty = true
+		return
+	}
+	// Compare headers
+	tabHeaders := make(map[string]string)
+	for _, h := range t.Headers {
+		if !h.IsGenerated && h.Key.Text() != "" {
+			tabHeaders[h.Key.Text()] = h.Value.Text()
+		}
+	}
+	if len(tabHeaders) != len(req.Headers) {
+		t.IsDirty = true
+		return
+	}
+	for k, v := range tabHeaders {
+		if req.Headers[k] != v {
+			t.IsDirty = true
+			return
+		}
+	}
+	t.IsDirty = false
+}
+
+func (t *RequestTab) saveToCollection() {
+	if t.LinkedNode == nil || t.LinkedNode.Request == nil {
+		return
+	}
+	req := t.LinkedNode.Request
+	req.URL = t.URLInput.Text()
+	req.Method = t.Method
+	req.Body = t.ReqEditor.Text()
+	req.Name = t.Title
+	req.Headers = make(map[string]string)
+	for _, h := range t.Headers {
+		if !h.IsGenerated && h.Key.Text() != "" {
+			req.Headers[h.Key.Text()] = h.Value.Text()
+		}
+	}
+	if t.LinkedNode.Collection != nil {
+		SaveCollectionToFile(t.LinkedNode.Collection)
+	}
+	t.IsDirty = false
 }
 
 func processTemplate(input string, env map[string]string) string {
@@ -535,22 +587,10 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 	}
 
 	if t.SaveToColBtn.Clicked(gtx) {
-		if t.LinkedNode != nil && t.LinkedNode.Request != nil {
-			req := t.LinkedNode.Request
-			req.URL = t.URLInput.Text()
-			req.Method = t.Method
-			req.Body = t.ReqEditor.Text()
-			req.Headers = make(map[string]string)
-			for _, h := range t.Headers {
-				if !h.IsGenerated && h.Key.Text() != "" {
-					req.Headers[h.Key.Text()] = h.Value.Text()
-				}
-			}
-			if t.LinkedNode.Collection != nil {
-				SaveCollectionToFile(t.LinkedNode.Collection)
-			}
-		}
+		t.saveToCollection()
 	}
+
+	t.checkDirty()
 
 	contentType := "none"
 	for _, h := range t.Headers {
