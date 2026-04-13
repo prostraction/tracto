@@ -398,6 +398,7 @@ func (ui *AppUI) loadState() {
 
 func (ui *AppUI) buildStateSnapshot() AppState {
 	state := AppState{
+		Tabs:               make([]TabState, 0, len(ui.Tabs)),
 		ActiveIdx:          ui.ActiveIdx,
 		ActiveEnvID:        ui.ActiveEnvID,
 		SidebarWidthPx:     ui.SidebarWidth,
@@ -418,11 +419,13 @@ func (ui *AppUI) buildStateSnapshot() AppState {
 			ts.CollectionID = tab.LinkedNode.Collection.ID
 			ts.NodePath = nodePathFrom(tab.LinkedNode.Collection.Root, tab.LinkedNode)
 		}
+		ts.Headers = make([]HeaderState, 0, len(tab.Headers))
 		for _, h := range tab.Headers {
-			k := h.Key.Text()
-			v := h.Value.Text()
-			if k != "" && !h.IsGenerated {
-				ts.Headers = append(ts.Headers, HeaderState{Key: k, Value: v})
+			if !h.IsGenerated {
+				k := h.Key.Text()
+				if k != "" {
+					ts.Headers = append(ts.Headers, HeaderState{Key: k, Value: h.Value.Text()})
+				}
 			}
 		}
 		state.Tabs = append(state.Tabs, ts)
@@ -953,7 +956,7 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 													Left:  unit.Dp(float32(node.Depth * 12)),
 													Right: unit.Dp(4),
 												}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-													var children []layout.FlexChild
+													children := make([]layout.FlexChild, 0, 3)
 													if node.IsFolder {
 														txt := node.Name
 														if node.Expanded {
@@ -1028,7 +1031,7 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 											}),
 											layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 												return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-													var actions []layout.FlexChild
+													actions := make([]layout.FlexChild, 0, 5)
 													if node.IsFolder || node.Depth == 0 {
 														actions = append(actions, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 															return menuOption(gtx, ui.Theme, &node.AddReqBtn, "Add Request", iconAddReq)
@@ -1916,7 +1919,7 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 
 		listDims := material.List(ui.Theme, &ui.TabsList).Layout(gtx, len(rows), func(gtx layout.Context, rIdx int) layout.Dimensions {
 			row := rows[rIdx]
-			var children []layout.FlexChild
+			children := make([]layout.FlexChild, 0, len(row))
 
 			for j, tIdx := range row {
 				if tIdx >= 0 {

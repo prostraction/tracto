@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -44,8 +42,6 @@ var (
 
 var httpClient = &http.Client{}
 
-var tplRegex = regexp.MustCompile(`\{\{([^}]+)\}\}`)
-
 func init() {
 	iconCopy, _ = widget.NewIcon(icons.ContentContentCopy)
 	iconWrap, _ = widget.NewIcon(icons.EditorWrapText)
@@ -67,6 +63,7 @@ type tabResponse struct {
 	respSize      int64
 	respFile      string
 	previewLoaded int64
+	isJSON        bool
 }
 
 type RequestTab struct {
@@ -112,6 +109,7 @@ type RequestTab struct {
 	cancelFn        context.CancelFunc
 	respSize        int64
 	respFile        string
+	respIsJSON      bool
 	downloadedBytes atomic.Int64
 	previewLoaded   int64
 
@@ -142,10 +140,19 @@ type RequestTab struct {
 	searchQuery    string
 	searchResults  []int
 	searchCurrent  int
+	searchCache    string
+	searchCacheDirty bool
 
-	URLSubmitted     bool
-	FileSaveChan     chan io.WriteCloser
-	dirtyCheckNeeded bool
+	URLSubmitted      bool
+	FileSaveChan      chan io.WriteCloser
+	dirtyCheckNeeded  bool
+	visibleHeadersBuf []*HeaderItem
+
+	appendChan       chan string
+	window           *app.Window
+	pendingRespWidth int
+	pendingReqWidth  int
+	widthChangeTime  time.Time
 }
 
 func NewRequestTab(title string) *RequestTab {
@@ -157,6 +164,7 @@ func NewRequestTab(title string) *RequestTab {
 		MethodClickables: make([]widget.Clickable, len(methods)),
 		responseChan:     make(chan tabResponse, 1),
 		FileSaveChan:     make(chan io.WriteCloser, 1),
+		appendChan:       make(chan string, 128),
 		SplitRatio:       0.5,
 		WrapEnabled:      true,
 		ReqWrapEnabled:   true,
@@ -225,10 +233,13 @@ func (t *RequestTab) saveToCollection() {
 	req.Method = t.Method
 	req.Body = t.ReqEditor.Text()
 	req.Name = t.Title
-	req.Headers = make(map[string]string)
+	req.Headers = make(map[string]string, len(t.Headers))
 	for _, h := range t.Headers {
-		if !h.IsGenerated && h.Key.Text() != "" {
-			req.Headers[h.Key.Text()] = h.Value.Text()
+		if !h.IsGenerated {
+			k := h.Key.Text()
+			if k != "" {
+				req.Headers[k] = h.Value.Text()
+			}
 		}
 	}
 	if t.LinkedNode.Collection != nil {
@@ -238,16 +249,38 @@ func (t *RequestTab) saveToCollection() {
 }
 
 func processTemplate(input string, env map[string]string) string {
-	if env == nil {
+	if env == nil || !strings.Contains(input, "{{") {
 		return input
 	}
-	return tplRegex.ReplaceAllStringFunc(input, func(m string) string {
-		k := strings.TrimSpace(m[2 : len(m)-2])
-		if v, ok := env[k]; ok {
-			return v
+	var b strings.Builder
+	b.Grow(len(input))
+	for i := 0; i < len(input); {
+		start := strings.Index(input[i:], "{{")
+		if start == -1 {
+			b.WriteString(input[i:])
+			break
 		}
-		return m
-	})
+		b.WriteString(input[i : i+start])
+		rest := input[i+start:]
+		end := strings.Index(rest[2:], "}}")
+		if end == -1 {
+			b.WriteString(rest)
+			break
+		}
+		end += 4
+		k := strings.TrimSpace(rest[2 : end-2])
+		if v, ok := env[k]; ok {
+			b.WriteString(v)
+		} else {
+			b.WriteString(rest[:end])
+		}
+		i += start + end
+	}
+	return b.String()
+}
+
+func (t *RequestTab) invalidateSearchCache() {
+	t.searchCacheDirty = true
 }
 
 func (t *RequestTab) performSearch() {
@@ -258,15 +291,21 @@ func (t *RequestTab) performSearch() {
 	if query == "" {
 		return
 	}
-	text := t.RespEditor.Text()
-	qLen := len(query)
-	for idx := 0; idx <= len(text)-qLen; {
-		if strings.EqualFold(text[idx:idx+qLen], query) {
-			t.searchResults = append(t.searchResults, idx)
-			idx += qLen
-		} else {
-			idx++
+	if t.searchCacheDirty || t.searchCache == "" {
+		t.searchCache = strings.ToLower(t.RespEditor.Text())
+		t.searchCacheDirty = false
+	}
+	q := strings.ToLower(query)
+	qLen := len(q)
+	text := t.searchCache
+	offset := 0
+	for offset <= len(text)-qLen {
+		idx := strings.Index(text[offset:], q)
+		if idx < 0 {
+			break
 		}
+		t.searchResults = append(t.searchResults, offset+idx)
+		offset += idx + qLen
 	}
 }
 
@@ -313,9 +352,12 @@ func (t *RequestTab) updateSystemHeaders() {
 	}
 
 	autoCT := "text/plain"
-	body := strings.TrimSpace(t.ReqEditor.Text())
-	if len(body) > 0 && (body[0] == '{' || body[0] == '[') {
-		autoCT = "application/json"
+	bodyLen := t.ReqEditor.Len()
+	if bodyLen > 0 {
+		body := t.ReqEditor.Text()
+		if body[0] == '{' || body[0] == '[' {
+			autoCT = "application/json"
+		}
 	}
 
 	sysHeaders := map[string]string{
@@ -334,17 +376,18 @@ func (t *RequestTab) updateSystemHeaders() {
 		}
 	}
 
-	var newHeaders []*HeaderItem
+	n := 0
 	for _, h := range t.Headers {
-		if !h.IsGenerated {
-			newHeaders = append(newHeaders, h)
-		} else {
-			if _, ok := sysHeaders[h.Key.Text()]; ok {
-				newHeaders = append(newHeaders, h)
-			}
+		keep := !h.IsGenerated
+		if !keep {
+			_, keep = sysHeaders[h.Key.Text()]
+		}
+		if keep {
+			t.Headers[n] = h
+			n++
 		}
 	}
-	t.Headers = newHeaders
+	t.Headers = t.Headers[:n]
 
 	for k, v := range sysHeaders {
 		found := false
@@ -365,6 +408,33 @@ func (t *RequestTab) updateSystemHeaders() {
 }
 
 func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Window, activeEnv map[string]string, isAppDragging bool, onSave func()) layout.Dimensions {
+	t.window = win
+
+	select {
+	case chunk := <-t.appendChan:
+		var buf strings.Builder
+		buf.WriteString(chunk)
+	drainLoop:
+		for {
+			select {
+			case more := <-t.appendChan:
+				buf.WriteString(more)
+			default:
+				break drainLoop
+			}
+		}
+		caretStart, caretEnd := t.RespEditor.Selection()
+		scrollY := t.RespEditor.GetScrollY()
+		endPos := t.RespEditor.Len()
+		t.RespEditor.SetCaret(endPos, endPos)
+		t.RespEditor.Insert(buf.String())
+		t.invalidateSearchCache()
+		t.RespEditor.SetCaret(caretStart, caretEnd)
+		t.RespEditor.SetScrollCaret(false)
+		t.RespEditor.SetScrollY(scrollY)
+	default:
+	}
+
 	for {
 		ev, ok := t.URLInput.Update(gtx)
 		if !ok {
@@ -392,12 +462,15 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 	select {
 	case res := <-t.responseChan:
 		if res.requestID == t.requestID {
+			t.drainAppendChan()
 			t.Status = res.status
 			t.respSize = res.respSize
 			t.respFile = res.respFile
 			t.previewLoaded = res.previewLoaded
+			t.respIsJSON = res.isJSON
 			t.isRequesting = false
 			t.cancelFn = nil
+			t.invalidateSearchCache()
 			if t.PreviewEnabled && res.body != "" {
 				t.RespEditor.SetText(res.body)
 			} else if !t.PreviewEnabled {
@@ -513,6 +586,8 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 		t.checkDirty()
 	}
 
+	contentType := "none"
+	visibleHeaders := t.visibleHeadersBuf[:0]
 	for _, h := range t.Headers {
 		for {
 			ev, ok := h.Key.Update(gtx)
@@ -532,23 +607,14 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 				t.dirtyCheckNeeded = true
 			}
 		}
-	}
-
-	contentType := "none"
-	for _, h := range t.Headers {
-		if strings.EqualFold(h.Key.Text(), "Content-Type") {
+		if contentType == "none" && strings.EqualFold(h.Key.Text(), "Content-Type") {
 			contentType = h.Value.Text()
-			break
+		}
+		if !h.IsGenerated || t.HeadersExpanded {
+			visibleHeaders = append(visibleHeaders, h)
 		}
 	}
-
-	var visibleHeaders []*HeaderItem
-	for _, h := range t.Headers {
-		if h.IsGenerated && !t.HeadersExpanded {
-			continue
-		}
-		visibleHeaders = append(visibleHeaders, h)
-	}
+	t.visibleHeadersBuf = visibleHeaders
 
 	flexWidth := float32(gtx.Constraints.Max.X - gtx.Dp(unit.Dp(8)))
 	var moved bool
@@ -634,7 +700,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 												return layout.Dimensions{Size: gtx.Constraints.Min}
 											}),
 											layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-												var children []layout.FlexChild
+												children := make([]layout.FlexChild, 0, len(methods))
 												for i, m := range methods {
 													idx := i
 													methodName := m
@@ -929,13 +995,25 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 												return ed.Layout(edGtx)
 											})
 										}
-										edGtx := gtx
-										if isDragging && t.LastReqWidth > 0 {
-											edGtx.Constraints.Max.X = t.LastReqWidth
-											edGtx.Constraints.Min.X = t.LastReqWidth
-										} else {
-											t.LastReqWidth = gtx.Constraints.Max.X
+										targetW := gtx.Constraints.Max.X
+										if t.LastReqWidth <= 0 {
+											t.LastReqWidth = targetW
 										}
+										if targetW != t.LastReqWidth && !isDragging {
+											if t.pendingReqWidth != targetW {
+												t.pendingReqWidth = targetW
+												t.widthChangeTime = gtx.Now
+											}
+											if gtx.Now.Sub(t.widthChangeTime) > 300*time.Millisecond {
+												t.LastReqWidth = t.pendingReqWidth
+												t.pendingReqWidth = 0
+											} else {
+												win.Invalidate()
+											}
+										}
+										edGtx := gtx
+										edGtx.Constraints.Max.X = t.LastReqWidth
+										edGtx.Constraints.Min.X = t.LastReqWidth
 										ed := material.Editor(th, &t.ReqEditor, "Request Body")
 										ed.TextSize = unit.Sp(13)
 										ed.Font = font.Font{Typeface: "Ubuntu Mono"}
@@ -1151,13 +1229,25 @@ func (t *RequestTab) layoutResponseBody(gtx layout.Context, th *material.Theme, 
 				})
 			}
 
-			edGtx := gtx
-			if isDragging && t.LastRespWidth > 0 {
-				edGtx.Constraints.Max.X = t.LastRespWidth
-				edGtx.Constraints.Min.X = t.LastRespWidth
-			} else {
-				t.LastRespWidth = gtx.Constraints.Max.X
+			targetW := gtx.Constraints.Max.X
+			if t.LastRespWidth <= 0 {
+				t.LastRespWidth = targetW
 			}
+			if targetW != t.LastRespWidth && !isDragging {
+				if t.pendingRespWidth != targetW {
+					t.pendingRespWidth = targetW
+					t.widthChangeTime = gtx.Now
+				}
+				if gtx.Now.Sub(t.widthChangeTime) > 300*time.Millisecond {
+					t.LastRespWidth = t.pendingRespWidth
+					t.pendingRespWidth = 0
+				} else {
+					win.Invalidate()
+				}
+			}
+			edGtx := gtx
+			edGtx.Constraints.Max.X = t.LastRespWidth
+			edGtx.Constraints.Min.X = t.LastRespWidth
 			ed := material.Editor(th, &t.RespEditor, "")
 			ed.TextSize = unit.Sp(13)
 			ed.Font = font.Font{Typeface: "Ubuntu Mono"}
@@ -1307,17 +1397,35 @@ func (t *RequestTab) prepareRequest(env map[string]string) (*http.Request, conte
 	return req, ctx, cancel, nil
 }
 
+func (t *RequestTab) drainAppendChan() {
+	for {
+		select {
+		case <-t.appendChan:
+		default:
+			return
+		}
+	}
+}
+
+func (t *RequestTab) streamToEditor(text string, win *app.Window) {
+	t.appendChan <- text
+	win.Invalidate()
+}
+
 func (t *RequestTab) beginRequest() {
 	t.cancelRequest()
 	t.requestID++
+	t.drainAppendChan()
 	select {
 	case <-t.responseChan:
 	default:
 	}
 	t.Status = "Sending..."
 	t.RespEditor.SetText("")
+	t.invalidateSearchCache()
 	t.isRequesting = true
 	t.respSize = 0
+	t.respIsJSON = false
 	t.downloadedBytes.Store(0)
 	t.cleanupRespFile()
 	t.PreviewEnabled = true
@@ -1333,9 +1441,12 @@ func (t *RequestTab) sendResponse(resp tabResponse) {
 	t.responseChan <- resp
 }
 
-func (t *RequestTab) streamResponse(ctx context.Context, body io.Reader, dest io.Writer, win *app.Window) (int64, error) {
+const maxStreamPreview = 512 * 1024
+
+func (t *RequestTab) streamResponse(ctx context.Context, body io.Reader, dest io.Writer, win *app.Window, livePreview bool) (int64, error) {
 	buf := make([]byte, 256*1024)
 	var total int64
+	var previewSent int64
 	lastUpdate := time.Now()
 	for {
 		n, readErr := body.Read(buf)
@@ -1345,7 +1456,21 @@ func (t *RequestTab) streamResponse(ctx context.Context, body io.Reader, dest io
 			}
 			total += int64(n)
 			t.downloadedBytes.Store(total)
-			if time.Since(lastUpdate) > 100*time.Millisecond {
+
+			if livePreview && previewSent < maxStreamPreview {
+				sendN := int64(n)
+				if previewSent+sendN > maxStreamPreview {
+					sendN = maxStreamPreview - previewSent
+				}
+				chunk := utils.SanitizeBytes(buf[:sendN])
+				select {
+				case t.appendChan <- chunk:
+				default:
+				}
+				previewSent += sendN
+			}
+
+			if time.Since(lastUpdate) > 250*time.Millisecond {
 				lastUpdate = time.Now()
 				win.Invalidate()
 			}
@@ -1360,42 +1485,154 @@ func (t *RequestTab) streamResponse(ctx context.Context, body io.Reader, dest io
 	return total, nil
 }
 
-const previewBatchSize = 5 * 1024 * 1024
+const previewBatchSize = 15 * 1024 * 1024
+const jsonPreviewBatchSize = 15 * 1024 * 1024
 
-func tryIndentJSON(data []byte) string {
-	if !json.Valid(data) {
-		return ""
+var indentTable [64]string
+
+func init() {
+	for i := range indentTable {
+		indentTable[i] = "\n" + strings.Repeat("  ", i)
 	}
-	var buf bytes.Buffer
-	buf.Grow(len(data) * 2)
-	if err := json.Indent(&buf, data, "", "  "); err != nil {
-		return ""
-	}
-	return buf.String()
 }
 
-func loadPreviewFromFile(path string, totalSize int64) (string, int64) {
-	readSize := totalSize
-	if readSize > previewBatchSize {
-		readSize = previewBatchSize
-	}
+func indentJSON(data []byte) string {
+	var out strings.Builder
+	out.Grow(len(data) * 3)
+	indent := 0
+	inString := false
+	needIndent := false
 
+	i := 0
+	for i < len(data) {
+		if inString {
+			start := i
+			for i < len(data) && data[i] != '"' && data[i] != '\\' {
+				i++
+			}
+			if i > start {
+				out.Write(data[start:i])
+			}
+			if i >= len(data) {
+				break
+			}
+			b := data[i]
+			i++
+			if b == '\\' {
+				out.WriteByte('\\')
+				if i < len(data) {
+					out.WriteByte(data[i])
+					i++
+				}
+			} else {
+				out.WriteByte('"')
+				inString = false
+			}
+			continue
+		}
+
+		b := data[i]
+		i++
+
+		switch b {
+		case '"':
+			if needIndent {
+				indentWrite(&out, indent)
+				needIndent = false
+			}
+			out.WriteByte('"')
+			inString = true
+		case '{', '[':
+			if needIndent {
+				indentWrite(&out, indent)
+				needIndent = false
+			}
+			out.WriteByte(b)
+			indent++
+			needIndent = true
+		case '}', ']':
+			indent--
+			if indent < 0 {
+				indent = 0
+			}
+			indentWrite(&out, indent)
+			out.WriteByte(b)
+		case ',':
+			out.WriteByte(',')
+			needIndent = true
+		case ':':
+			out.WriteByte(':')
+			out.WriteByte(' ')
+		case ' ', '\t', '\n', '\r':
+		default:
+			if needIndent {
+				indentWrite(&out, indent)
+				needIndent = false
+			}
+			start := i - 1
+			for i < len(data) {
+				c := data[i]
+				if c == ',' || c == '}' || c == ']' || c == ':' || c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+					break
+				}
+				i++
+			}
+			out.Write(data[start:i])
+		}
+	}
+	return out.String()
+}
+
+func indentWrite(out *strings.Builder, indent int) {
+	if indent >= len(indentTable) {
+		indent = len(indentTable) - 1
+	}
+	out.WriteString(indentTable[indent])
+}
+
+func looksLikeJSON(data []byte) bool {
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+func loadPreviewFromFile(path string, totalSize int64) (string, int64, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", 0
+		return "", 0, false
 	}
 	defer f.Close()
+
+	probe := make([]byte, 64)
+	pn, _ := f.Read(probe)
+	isJSON := looksLikeJSON(probe[:pn])
+
+	batchSize := int64(previewBatchSize)
+	if isJSON {
+		batchSize = int64(jsonPreviewBatchSize)
+	}
+	readSize := totalSize
+	if readSize > batchSize {
+		readSize = batchSize
+	}
+
+	f.Seek(0, io.SeekStart)
 	data := make([]byte, readSize)
 	n, _ := io.ReadFull(f, data)
 	data = data[:n]
 
-	if totalSize <= previewBatchSize {
-		if formatted := tryIndentJSON(data); formatted != "" {
-			return utils.SanitizeText(formatted), int64(n)
-		}
+	if isJSON {
+		return indentJSON(data), int64(n), true
 	}
-
-	return utils.SanitizeText(string(data)), int64(n)
+	return utils.SanitizeBytes(data), int64(n), false
 }
 
 func (t *RequestTab) loadMorePreview() {
@@ -1403,29 +1640,40 @@ func (t *RequestTab) loadMorePreview() {
 		return
 	}
 
-	f, err := os.Open(t.respFile)
-	if err != nil {
-		return
+	filePath := t.respFile
+	offset := t.previewLoaded
+	batchLimit := int64(previewBatchSize)
+	if t.respIsJSON {
+		batchLimit = int64(jsonPreviewBatchSize)
 	}
-	defer f.Close()
-	f.Seek(t.previewLoaded, io.SeekStart)
-
 	readSize := t.respSize - t.previewLoaded
-	if readSize > previewBatchSize {
-		readSize = previewBatchSize
+	if readSize > batchLimit {
+		readSize = batchLimit
 	}
-	data := make([]byte, readSize)
-	n, _ := io.ReadFull(f, data)
-	data = data[:n]
+	t.previewLoaded += readSize
+	win := t.window
+	isJSON := t.respIsJSON
 
-	extra := utils.SanitizeText(string(data))
-	if formatted := tryIndentJSON(data); formatted != "" {
-		extra = utils.SanitizeText(formatted)
-	}
-	t.previewLoaded += int64(n)
+	go func() {
+		f, err := os.Open(filePath)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		f.Seek(offset, io.SeekStart)
 
-	current := t.RespEditor.Text()
-	t.RespEditor.SetText(current + extra)
+		data := make([]byte, readSize)
+		n, _ := io.ReadFull(f, data)
+		data = data[:n]
+
+		var extra string
+		if isJSON {
+			extra = indentJSON(data)
+		} else {
+			extra = utils.SanitizeBytes(data)
+		}
+		t.streamToEditor(extra, win)
+	}()
 }
 
 func openFile(path string) {
@@ -1486,7 +1734,7 @@ func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
 		}
 		tmpPath := tmpFile.Name()
 
-		total, sErr := t.streamResponse(ctx, resp.Body, tmpFile, win)
+		total, sErr := t.streamResponse(ctx, resp.Body, tmpFile, win, true)
 		tmpFile.Close()
 
 		if sErr != nil {
@@ -1500,8 +1748,9 @@ func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
 		}
 
 		duration := time.Since(start)
-		display, loaded := loadPreviewFromFile(tmpPath, total)
+		display, loaded, isJSON := loadPreviewFromFile(tmpPath, total)
 		statusText := fmt.Sprintf("%s  %s  %s", resp.Status, duration.Round(time.Millisecond), formatSize(total))
+
 		t.sendResponse(tabResponse{
 			requestID:     reqID,
 			status:        statusText,
@@ -1509,6 +1758,7 @@ func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
 			respSize:      total,
 			respFile:      tmpPath,
 			previewLoaded: loaded,
+			isJSON:        isJSON,
 		})
 	}()
 }
@@ -1552,7 +1802,7 @@ func (t *RequestTab) executeRequestToFile(win *app.Window, env map[string]string
 			writer = io.MultiWriter(dest, tmpFile)
 		}
 
-		total, sErr := t.streamResponse(ctx, resp.Body, writer, win)
+		total, sErr := t.streamResponse(ctx, resp.Body, writer, win, false)
 
 		var tmpPath string
 		if tmpFile != nil {
@@ -1588,9 +1838,12 @@ func (t *RequestTab) loadPreviewForSavedFile() {
 	if t.respFile == "" || t.respSize == 0 {
 		return
 	}
-	display, loaded := loadPreviewFromFile(t.respFile, t.respSize)
-	t.previewLoaded = loaded
-	t.RespEditor.SetText(display)
 	t.PreviewEnabled = true
+	display, loaded, isJSON := loadPreviewFromFile(t.respFile, t.respSize)
+	t.previewLoaded = loaded
+	t.respIsJSON = isJSON
+
+	t.RespEditor.SetText(display)
+	t.invalidateSearchCache()
 }
 
