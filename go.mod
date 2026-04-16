@@ -2,8 +2,6 @@ module tracto
 
 go 1.25.5
 
-replace github.com/nanorele/gio v1.0.5 => ./gio-local
-
 require (
 	github.com/nanorele/gio v1.0.5
 	github.com/nanorele/gio-x v1.0.5

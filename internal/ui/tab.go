@@ -141,16 +141,16 @@ type RequestTab struct {
 	HeaderSplitDrag  gesture.Drag
 	HeaderSplitDragX float32
 
-	SearchOpen     bool
-	SearchEditor   widget.Editor
-	SearchBtn      widget.Clickable
-	SearchNextBtn  widget.Clickable
-	SearchPrevBtn  widget.Clickable
-	SearchCloseBtn widget.Clickable
-	searchQuery    string
-	searchResults  []int
-	searchCurrent  int
-	searchCache    string
+	SearchOpen       bool
+	SearchEditor     widget.Editor
+	SearchBtn        widget.Clickable
+	SearchNextBtn    widget.Clickable
+	SearchPrevBtn    widget.Clickable
+	SearchCloseBtn   widget.Clickable
+	searchQuery      string
+	searchResults    []int
+	searchCurrent    int
+	searchCache      string
 	searchCacheDirty bool
 
 	URLSubmitted      bool
@@ -457,7 +457,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 		t.RespEditor.Insert(buf.String())
 		t.invalidateSearchCache()
 		t.RespEditor.SetCaret(caretStart, caretEnd)
-		t.RespEditor.SetScrollCaret(false)
+		//t.RespEditor.SetScrollCaret(false)
 		t.RespEditor.SetScrollY(scrollY)
 	default:
 	}
@@ -1896,4 +1896,3 @@ func (t *RequestTab) loadPreviewForSavedFile() {
 	t.RespEditor.SetText(display)
 	t.invalidateSearchCache()
 }
-

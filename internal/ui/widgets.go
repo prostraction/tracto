@@ -313,6 +313,9 @@ func SquareBtn(gtx layout.Context, clk *widget.Clickable, ic *widget.Icon, th *m
 func menuOption(gtx layout.Context, th *material.Theme, clk *widget.Clickable, title string, icon *widget.Icon) layout.Dimensions {
 	return material.Clickable(gtx, clk, func(gtx layout.Context) layout.Dimensions {
 		gtx.Constraints.Min.X = gtx.Dp(150)
+		if clk.Hovered() {
+			paint.FillShape(gtx.Ops, colorBgHover, clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 4).Op(gtx.Ops))
+		}
 		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {

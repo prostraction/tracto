@@ -22,6 +22,7 @@ import (
 	"github.com/nanorele/gio/io/event"
 	"github.com/nanorele/gio/io/key"
 	"github.com/nanorele/gio/io/pointer"
+	"github.com/nanorele/gio/io/transfer"
 	"github.com/nanorele/gio/io/system"
 	"github.com/nanorele/gio/layout"
 	"github.com/nanorele/gio/op"
@@ -114,10 +115,17 @@ type AppUI struct {
 
 	TabCtxMenuOpen    bool
 	TabCtxMenuIdx     int
+	TabCtxMenuPos     f32.Point
 	TabCtxClose       widget.Clickable
 	TabCtxCloseOthers widget.Clickable
 	TabCtxCloseAll    widget.Clickable
 
+	ColsExpanded     bool
+	ColsHeaderClick  widget.Clickable
+	EnvsExpanded     bool
+	EnvsHeaderClick  widget.Clickable
+
+	SidebarDropTag   bool
 	TabDragTag       bool
 	TabDragIdx       int
 	TabDragging      bool
@@ -205,6 +213,8 @@ func NewAppUI() *AppUI {
 		EnvLoadedChan:    make(chan *EnvironmentUI, 5),
 		tabWidthCache:    make(map[*RequestTab]cachedTab),
 		activeEnvDirty:   true,
+		ColsExpanded:     true,
+		EnvsExpanded:     true,
 	}
 	ui.Explorer = explorer.NewExplorer(ui.Window)
 	ui.TabsList.Axis = layout.Vertical
@@ -296,12 +306,36 @@ func (ui *AppUI) refreshActiveEnv() {
 	}
 }
 
+func (ui *AppUI) importDroppedData(data []byte) {
+	// Try parsing as collection
+	id, _ := saveCollectionRaw(data)
+	col, err := ParseCollection(bytes.NewReader(data), id)
+	if err == nil && col != nil && col.Name != "" {
+		ui.ColLoadedChan <- &CollectionUI{Data: col}
+		ui.Window.Invalidate()
+		return
+	}
+
+	// Try parsing as environment
+	envID, _ := saveEnvironmentRaw(data)
+	env, err := ParseEnvironment(bytes.NewReader(data), envID)
+	if err == nil && env != nil && env.Name != "" {
+		ui.EnvLoadedChan <- &EnvironmentUI{Data: env}
+		ui.Window.Invalidate()
+		return
+	}
+}
+
 func (ui *AppUI) Run() error {
 	var ops op.Ops
 	for {
 		e := ui.Window.Event()
 		ui.Explorer.ListenEvents(e)
 		switch e := e.(type) {
+		case transfer.DataEvent:
+			if data, err := io.ReadAll(e.Open()); err == nil {
+				ui.importDroppedData(data)
+			}
 		case app.DestroyEvent:
 			for _, tab := range ui.Tabs {
 				tab.cancelRequest()
@@ -662,6 +696,8 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 	gtx.Constraints.Min = size
 
 	bgClip := clip.Rect{Max: size}.Push(gtx.Ops)
+	event.Op(gtx.Ops, transfer.TargetFilter{Target: &ui.SidebarDropTag, Type: "text/plain"})
+	event.Op(gtx.Ops, transfer.TargetFilter{Target: &ui.SidebarDropTag, Type: "application/json"})
 	event.Op(gtx.Ops, &ui.ColList)
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
@@ -721,31 +757,55 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						for ui.ImportBtn.Clicked(gtx) {
-							go func() {
-								file, err := ui.Explorer.ChooseFile("json")
-								if err == nil && file != nil {
-									data, err := io.ReadAll(file)
-									file.Close()
-									if err == nil {
-										id, _ := saveCollectionRaw(data)
-										col, err := ParseCollection(bytes.NewReader(data), id)
-										if err == nil && col != nil {
-											ui.ColLoadedChan <- &CollectionUI{Data: col}
-											ui.Window.Invalidate()
-										}
+					if ui.ColsHeaderClick.Clicked(gtx) {
+						ui.ColsExpanded = !ui.ColsExpanded
+					}
+					for ui.ImportBtn.Clicked(gtx) {
+						go func() {
+							file, err := ui.Explorer.ChooseFile("json")
+							if err == nil && file != nil {
+								data, err := io.ReadAll(file)
+								file.Close()
+								if err == nil {
+									id, _ := saveCollectionRaw(data)
+									col, err := ParseCollection(bytes.NewReader(data), id)
+									if err == nil && col != nil {
+										ui.ColLoadedChan <- &CollectionUI{Data: col}
+										ui.Window.Invalidate()
 									}
 								}
-							}()
-						}
-						btn := material.Button(ui.Theme, &ui.ImportBtn, "Import Collection")
-						btn.Background = colorAccent
-						btn.Color = ui.Theme.Palette.Fg
-						btn.TextSize = unit.Sp(12)
-						btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}
-						gtx.Constraints.Min.X = gtx.Constraints.Max.X
-						return btn.Layout(gtx)
+							}
+						}()
+					}
+
+					return material.Clickable(gtx, &ui.ColsHeaderClick, func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									txt := "►"
+									if ui.ColsExpanded {
+										txt = "▼"
+									}
+									lbl := material.Label(ui.Theme, unit.Sp(10), txt)
+									lbl.Color = colorFgMuted
+									return lbl.Layout(gtx)
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									lbl := material.Label(ui.Theme, unit.Sp(12), "Collections")
+									lbl.Font.Weight = font.Bold
+									return lbl.Layout(gtx)
+								}),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									btn := material.Button(ui.Theme, &ui.ImportBtn, "Import")
+									btn.Background = colorAccent
+									btn.Color = ui.Theme.Palette.Fg
+									btn.TextSize = unit.Sp(10)
+									btn.Inset = layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}
+									return btn.Layout(gtx)
+								}),
+							)
+						})
 					})
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -754,6 +814,9 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 					return layout.Dimensions{Size: rect.Max}
 				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					if !ui.ColsExpanded {
+						return layout.Dimensions{}
+					}
 					if len(ui.Collections) == 0 {
 						return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							lbl := material.Label(ui.Theme, unit.Sp(12), "No collections loaded")
@@ -1098,31 +1161,55 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						for ui.ImportEnvBtn.Clicked(gtx) {
-							go func() {
-								file, err := ui.Explorer.ChooseFile("json")
-								if err == nil && file != nil {
-									data, err := io.ReadAll(file)
-									file.Close()
-									if err == nil {
-										id, _ := saveEnvironmentRaw(data)
-										env, err := ParseEnvironment(bytes.NewReader(data), id)
-										if err == nil && env != nil {
-											ui.EnvLoadedChan <- &EnvironmentUI{Data: env}
-											ui.Window.Invalidate()
-										}
+					if ui.EnvsHeaderClick.Clicked(gtx) {
+						ui.EnvsExpanded = !ui.EnvsExpanded
+					}
+					for ui.ImportEnvBtn.Clicked(gtx) {
+						go func() {
+							file, err := ui.Explorer.ChooseFile("json")
+							if err == nil && file != nil {
+								data, err := io.ReadAll(file)
+								file.Close()
+								if err == nil {
+									id, _ := saveEnvironmentRaw(data)
+									env, err := ParseEnvironment(bytes.NewReader(data), id)
+									if err == nil && env != nil {
+										ui.EnvLoadedChan <- &EnvironmentUI{Data: env}
+										ui.Window.Invalidate()
 									}
 								}
-							}()
-						}
-						btn := material.Button(ui.Theme, &ui.ImportEnvBtn, "Import Environment")
-						btn.Background = colorBgField
-						btn.Color = ui.Theme.Palette.Fg
-						btn.TextSize = unit.Sp(12)
-						btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}
-						gtx.Constraints.Min.X = gtx.Constraints.Max.X
-						return btn.Layout(gtx)
+							}
+						}()
+					}
+
+					return material.Clickable(gtx, &ui.EnvsHeaderClick, func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									txt := "►"
+									if ui.EnvsExpanded {
+										txt = "▼"
+									}
+									lbl := material.Label(ui.Theme, unit.Sp(10), txt)
+									lbl.Color = colorFgMuted
+									return lbl.Layout(gtx)
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									lbl := material.Label(ui.Theme, unit.Sp(12), "Environments")
+									lbl.Font.Weight = font.Bold
+									return lbl.Layout(gtx)
+								}),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									btn := material.Button(ui.Theme, &ui.ImportEnvBtn, "Import")
+									btn.Background = colorBgField
+									btn.Color = ui.Theme.Palette.Fg
+									btn.TextSize = unit.Sp(10)
+									btn.Inset = layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}
+									return btn.Layout(gtx)
+								}),
+							)
+						})
 					})
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1131,6 +1218,9 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 					return layout.Dimensions{Size: rect.Max}
 				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					if !ui.EnvsExpanded {
+						return layout.Dimensions{}
+					}
 					if len(ui.Environments) == 0 {
 						return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							lbl := material.Label(ui.Theme, unit.Sp(12), "No environments loaded")
@@ -1451,6 +1541,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 			key.Filter{Name: "S", Required: key.ModShortcut},
 			key.Filter{Name: "W", Required: key.ModShortcut},
 			key.Filter{Name: "F", Required: key.ModShortcut},
+			key.Filter{Name: key.NameReturn, Required: key.ModShortcut},
 		)
 		if !ok {
 			break
@@ -1468,6 +1559,13 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 			case "F":
 				if ui.ActiveIdx >= 0 && ui.ActiveIdx < len(ui.Tabs) {
 					ui.Tabs[ui.ActiveIdx].SearchOpen = !ui.Tabs[ui.ActiveIdx].SearchOpen
+				}
+			case key.NameReturn:
+				if ui.ActiveIdx >= 0 && ui.ActiveIdx < len(ui.Tabs) {
+					tab := ui.Tabs[ui.ActiveIdx]
+					tab.SendMenuOpen = false
+					tab.executeRequest(ui.Window, ui.activeEnvVars)
+					ui.saveState()
 				}
 			}
 		}
@@ -1639,62 +1737,47 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 							ui.saveState()
 						})
 					}
-					return layout.Dimensions{}
+					
+					// Empty state
+					return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								gtx.Constraints.Min = image.Point{X: gtx.Dp(unit.Dp(64)), Y: gtx.Dp(unit.Dp(64))}
+								return iconSearch.Layout(gtx, colorFgMuted)
+							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Label(ui.Theme, unit.Sp(16), "No request selected")
+								lbl.Color = colorFgMuted
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Label(ui.Theme, unit.Sp(14), "Select one from the sidebar or click '+' to create a new one")
+								lbl.Color = colorFgDim
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if ui.AddTabBtn.Clicked(gtx) {
+									ui.TabCtxMenuOpen = false
+									newTab := NewRequestTab("New request")
+									ui.Tabs = append(ui.Tabs, newTab)
+									ui.ActiveIdx = len(ui.Tabs) - 1
+								}
+								btn := material.Button(ui.Theme, &ui.AddTabBtn, "Create Request")
+								btn.Background = colorAccent
+								btn.Color = ui.Theme.Palette.ContrastFg
+								btn.TextSize = unit.Sp(14)
+								btn.Inset = layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(16), Right: unit.Dp(16)}
+								return btn.Layout(gtx)
+							}),
+						)
+					})
 				}),
 			)
 		}),
 	)
-
-	if ui.TabCtxMenuOpen {
-		macro := op.Record(gtx.Ops)
-		op.Offset(image.Pt(gtx.Dp(unit.Dp(80)), gtx.Dp(unit.Dp(30)))).Add(gtx.Ops)
-
-		menuItem := func(gtx layout.Context, clk *widget.Clickable, title string) layout.Dimensions {
-			return material.Clickable(gtx, clk, func(gtx layout.Context) layout.Dimensions {
-				return layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(140))
-					lbl := material.Label(ui.Theme, unit.Sp(12), title)
-					return lbl.Layout(gtx)
-				})
-			})
-		}
-
-		rec := op.Record(gtx.Ops)
-		menuGtx := gtx
-		menuGtx.Constraints.Min = image.Point{}
-		menuGtx.Constraints.Max = image.Pt(gtx.Dp(unit.Dp(200)), gtx.Dp(unit.Dp(300)))
-		menuDims := layout.UniformInset(unit.Dp(4)).Layout(menuGtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return menuItem(gtx, &ui.TabCtxClose, "Close")
-				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return menuItem(gtx, &ui.TabCtxCloseOthers, "Close others")
-				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return menuItem(gtx, &ui.TabCtxCloseAll, "Close all")
-				}),
-			)
-		})
-		menuCall := rec.Stop()
-
-		sz := menuDims.Size
-		b := 1
-		if gtx.Dp(unit.Dp(1)) > 1 {
-			b = gtx.Dp(unit.Dp(1))
-		}
-		paint.FillShape(gtx.Ops, colorBorderLight,
-			clip.UniformRRect(image.Rectangle{Max: image.Pt(sz.X+b*2, sz.Y+b*2)}, 4).Op(gtx.Ops))
-		op.Offset(image.Pt(b, b)).Add(gtx.Ops)
-		paint.FillShape(gtx.Ops, colorBgPopup,
-			clip.UniformRRect(image.Rectangle{Max: sz}, 3).Op(gtx.Ops))
-		op.Offset(image.Pt(-b, -b)).Add(gtx.Ops)
-
-		menuCall.Add(gtx.Ops)
-
-		call := macro.Stop()
-		op.Defer(gtx.Ops, call)
-	}
 
 	return dims
 }
@@ -1709,7 +1792,7 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 		tabHeight := gtx.Dp(unit.Dp(36))
 		closeBtnWidth := gtx.Dp(unit.Dp(28))
 		addBtnW := gtx.Dp(unit.Dp(36))
-		maxWidth := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(16))
+		maxWidth := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(4))
 
 		tabs := ui.tabInfoBuf[:0]
 		for i, tab := range ui.Tabs {
@@ -1875,6 +1958,13 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 							ui.TabDragging = false
 							ui.TabDragPressTime = gtx.Now
 						}
+					} else if pe.Buttons.Contain(pointer.ButtonSecondary) {
+						hit := tabIdxAtXY(pe.Position.X, pe.Position.Y)
+						if hit >= 0 {
+							ui.TabCtxMenuOpen = true
+							ui.TabCtxMenuIdx = hit
+							ui.TabCtxMenuPos = pe.Position
+						}
 					}
 				case pointer.Drag:
 					ui.TabDragCurrentX = pe.Position.X
@@ -1922,169 +2012,174 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 		var dragTabOX, dragTabOY int
 		var dragTabW int
 
-		listDims := material.List(ui.Theme, &ui.TabsList).Layout(gtx, len(rows), func(gtx layout.Context, rIdx int) layout.Dimensions {
+		rowChildren := make([]layout.FlexChild, len(rows))
+		for i := range rows {
+			rIdx := i
 			row := rows[rIdx]
-			children := make([]layout.FlexChild, 0, len(row))
+			rowChildren[rIdx] = layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				children := make([]layout.FlexChild, 0, len(row))
 
-			for j, tIdx := range row {
-				if tIdx >= 0 {
-					idx := tIdx
-					finalW := tabs[idx].FinalWidth
-					children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						gtx.Constraints.Min.X = finalW
-						gtx.Constraints.Max.X = finalW
-						gtx.Constraints.Min.Y = tabHeight
-						gtx.Constraints.Max.Y = tabHeight
+				for j, tIdx := range row {
+					if tIdx >= 0 {
+						idx := tIdx
+						finalW := tabs[idx].FinalWidth
+						children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							gtx.Constraints.Min.X = finalW
+							gtx.Constraints.Max.X = finalW
+							gtx.Constraints.Min.Y = tabHeight
+							gtx.Constraints.Max.Y = tabHeight
 
-						if ui.TabDragging && ui.TabDragIdx == idx {
-							dragTabOX = int(ui.TabDragCurrentX - ui.TabDragOriginX)
-							dragTabOY = int(ui.TabDragCurrentY - ui.TabDragOriginY)
-							dragTabW = finalW
-							paint.FillShape(gtx.Ops, colorBgDragHolder, clip.Rect{Max: image.Pt(finalW, tabHeight)}.Op())
-							return layout.Dimensions{Size: image.Pt(finalW, tabHeight)}
-						}
-
-						tab := ui.Tabs[idx]
-						if tab.TabBtn.Clicked(gtx) {
-							if !ui.TabDragging {
-								ui.ActiveIdx = idx
-								ui.TabCtxMenuOpen = false
-								ui.revealLinkedNode(tab)
+							if ui.TabDragging && ui.TabDragIdx == idx {
+								dragTabOX = int(ui.TabDragCurrentX - ui.TabDragOriginX)
+								dragTabOY = int(ui.TabDragCurrentY - ui.TabDragOriginY)
+								dragTabW = finalW
+								paint.FillShape(gtx.Ops, colorBgDragHolder, clip.Rect{Max: image.Pt(finalW, tabHeight)}.Op())
+								return layout.Dimensions{Size: image.Pt(finalW, tabHeight)}
 							}
-						}
 
-						for {
-							ev, ok := gtx.Event(pointer.Filter{
-								Target: &tab.TabBtn,
-								Kinds:  pointer.Press,
-							})
-							if !ok {
-								break
-							}
-							if pe, ok := ev.(pointer.Event); ok && pe.Buttons.Contain(pointer.ButtonSecondary) {
-								ui.TabCtxMenuOpen = true
-								ui.TabCtxMenuIdx = idx
-							}
-						}
-
-						bgColor := colorBgDark
-						fgColor := colorFgMuted
-						if idx == ui.ActiveIdx {
-							bgColor = colorBg
-							fgColor = colorWhite
-						}
-
-						return layout.Stack{}.Layout(gtx,
-							layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-								paint.FillShape(gtx.Ops, bgColor, clip.Rect{Max: gtx.Constraints.Min}.Op())
-								if idx == ui.ActiveIdx {
-									paint.FillShape(gtx.Ops, colorAccent, clip.Rect{Max: image.Point{X: gtx.Constraints.Min.X, Y: gtx.Dp(unit.Dp(2))}}.Op())
+							tab := ui.Tabs[idx]
+							if tab.TabBtn.Clicked(gtx) {
+								if !ui.TabDragging {
+									ui.ActiveIdx = idx
+									ui.TabCtxMenuOpen = false
+									ui.revealLinkedNode(tab)
 								}
-								return layout.Dimensions{Size: gtx.Constraints.Min}
-							}),
-							layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-								return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-									layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-										gtx.Constraints.Min.Y = gtx.Constraints.Max.Y
-										gtx.Constraints.Min.X = gtx.Constraints.Max.X
-										return material.Clickable(gtx, &tab.TabBtn, func(gtx layout.Context) layout.Dimensions {
-											gtx.Constraints.Min = gtx.Constraints.Max
-											return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-												return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(10), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-													cleanTitle := tab.getCleanTitle()
-													if tab.IsDirty {
-														cleanTitle = "● " + cleanTitle
-													}
-													lbl := material.Label(ui.Theme, unit.Sp(12), cleanTitle)
-													lbl.Color = fgColor
-													lbl.MaxLines = 2
-													lbl.Truncator = "..."
-													return lbl.Layout(gtx)
+							}
+
+							for {
+								ev, ok := gtx.Event(pointer.Filter{
+									Target: &tab.TabBtn,
+									Kinds:  pointer.Press,
+								})
+								if !ok {
+									break
+								}
+								if pe, ok := ev.(pointer.Event); ok && pe.Buttons.Contain(pointer.ButtonSecondary) {
+									ui.TabCtxMenuOpen = true
+									ui.TabCtxMenuIdx = idx
+									ui.TabCtxMenuPos = pe.Position
+								}
+							}
+
+							bgColor := colorBgDark
+							fgColor := colorFgMuted
+							if idx == ui.ActiveIdx {
+								bgColor = colorBg
+								fgColor = colorWhite
+							}
+
+							return layout.Stack{}.Layout(gtx,
+								layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+									paint.FillShape(gtx.Ops, bgColor, clip.Rect{Max: gtx.Constraints.Min}.Op())
+									if idx == ui.ActiveIdx {
+										paint.FillShape(gtx.Ops, colorAccent, clip.Rect{Max: image.Point{X: gtx.Constraints.Min.X, Y: gtx.Dp(unit.Dp(2))}}.Op())
+									}
+									return layout.Dimensions{Size: gtx.Constraints.Min}
+								}),
+								layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+									return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+										layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+											gtx.Constraints.Min.Y = gtx.Constraints.Max.Y
+											gtx.Constraints.Min.X = gtx.Constraints.Max.X
+											return material.Clickable(gtx, &tab.TabBtn, func(gtx layout.Context) layout.Dimensions {
+												gtx.Constraints.Min = gtx.Constraints.Max
+												return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+													return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(10), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+														cleanTitle := tab.getCleanTitle()
+														if tab.IsDirty {
+															cleanTitle = "● " + cleanTitle
+														}
+														lbl := material.Label(ui.Theme, unit.Sp(12), cleanTitle)
+														lbl.Color = fgColor
+														lbl.MaxLines = 2
+														lbl.Truncator = "..."
+														return lbl.Layout(gtx)
+													})
 												})
 											})
-										})
-									}),
-									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										gtx.Constraints.Min.X = closeBtnWidth
-										gtx.Constraints.Max.X = closeBtnWidth
-										gtx.Constraints.Min.Y = gtx.Constraints.Max.Y
-										return material.Clickable(gtx, &tab.CloseBtn, func(gtx layout.Context) layout.Dimensions {
-											gtx.Constraints.Min = gtx.Constraints.Max
-											return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-												size := gtx.Dp(unit.Dp(16))
-												gtx.Constraints.Min = image.Point{X: size, Y: size}
-												gtx.Constraints.Max = gtx.Constraints.Min
-												return iconClose.Layout(gtx, fgColor)
+										}),
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											gtx.Constraints.Min.X = closeBtnWidth
+											gtx.Constraints.Max.X = closeBtnWidth
+											gtx.Constraints.Min.Y = gtx.Constraints.Max.Y
+											return material.Clickable(gtx, &tab.CloseBtn, func(gtx layout.Context) layout.Dimensions {
+												gtx.Constraints.Min = gtx.Constraints.Max
+												return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+													size := gtx.Dp(unit.Dp(16))
+													gtx.Constraints.Min = image.Point{X: size, Y: size}
+													gtx.Constraints.Max = gtx.Constraints.Min
+													return iconClose.Layout(gtx, fgColor)
+												})
 											})
-										})
-									}),
-								)
-							}),
-							layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-								maxX := gtx.Constraints.Min.X
-								maxY := gtx.Constraints.Min.Y
-								t := 1
-								if gtx.Dp(1) > 1 {
-									t = gtx.Dp(1)
-								}
-								paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, maxY-t), Max: image.Pt(maxX, maxY)}.Op())
-								paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(maxX-t, 0), Max: image.Pt(maxX, maxY)}.Op())
-								if rIdx == 0 {
-									paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(maxX, t)}.Op())
-								}
-								if j == 0 {
-									paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(t, maxY)}.Op())
-								}
-								return layout.Dimensions{Size: gtx.Constraints.Min}
-							}),
-						)
-					}))
-				} else {
-					children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						gtx.Constraints.Min.X = gtx.Dp(unit.Dp(36))
-						gtx.Constraints.Max.X = gtx.Constraints.Min.X
-						gtx.Constraints.Min.Y = tabHeight
-						gtx.Constraints.Max.Y = tabHeight
+										}),
+									)
+								}),
+								layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+									maxX := gtx.Constraints.Min.X
+									maxY := gtx.Constraints.Min.Y
+									t := 1
+									if gtx.Dp(1) > 1 {
+										t = gtx.Dp(1)
+									}
+									paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, maxY-t), Max: image.Pt(maxX, maxY)}.Op())
+									paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(maxX-t, 0), Max: image.Pt(maxX, maxY)}.Op())
+									if rIdx == 0 {
+										paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(maxX, t)}.Op())
+									}
+									if j == 0 {
+										paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(t, maxY)}.Op())
+									}
+									return layout.Dimensions{Size: gtx.Constraints.Min}
+								}),
+							)
+						}))
+					} else {
+						children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							gtx.Constraints.Min.X = gtx.Dp(unit.Dp(36))
+							gtx.Constraints.Max.X = gtx.Constraints.Min.X
+							gtx.Constraints.Min.Y = tabHeight
+							gtx.Constraints.Max.Y = tabHeight
 
-						return layout.Stack{}.Layout(gtx,
-							layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-								paint.FillShape(gtx.Ops, colorBgDark, clip.Rect{Max: gtx.Constraints.Min}.Op())
-								return layout.Dimensions{Size: gtx.Constraints.Min}
-							}),
-							layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-								btn := material.Button(ui.Theme, &ui.AddTabBtn, "+")
-								btn.Background = colorBgDark
-								btn.Color = ui.Theme.Palette.Fg
-								btn.TextSize = unit.Sp(16)
-								btn.CornerRadius = unit.Dp(0)
-								btn.Inset = layout.Inset{}
-								gtx.Constraints.Min = gtx.Constraints.Max
-								return btn.Layout(gtx)
-							}),
-							layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-								maxX := gtx.Constraints.Min.X
-								maxY := gtx.Constraints.Min.Y
-								t := 1
-								if gtx.Dp(1) > 1 {
-									t = gtx.Dp(1)
-								}
-								paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, maxY-t), Max: image.Pt(maxX, maxY)}.Op())
-								paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(maxX-t, 0), Max: image.Pt(maxX, maxY)}.Op())
-								if rIdx == 0 {
-									paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(maxX, t)}.Op())
-								}
-								if j == 0 {
-									paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(t, maxY)}.Op())
-								}
-								return layout.Dimensions{Size: gtx.Constraints.Min}
-							}),
-						)
-					}))
+							return layout.Stack{}.Layout(gtx,
+								layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+									paint.FillShape(gtx.Ops, colorBgDark, clip.Rect{Max: gtx.Constraints.Min}.Op())
+									return layout.Dimensions{Size: gtx.Constraints.Min}
+								}),
+								layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+									btn := material.Button(ui.Theme, &ui.AddTabBtn, "+")
+									btn.Background = colorBgDark
+									btn.Color = ui.Theme.Palette.Fg
+									btn.TextSize = unit.Sp(16)
+									btn.CornerRadius = unit.Dp(0)
+									btn.Inset = layout.Inset{}
+									gtx.Constraints.Min = gtx.Constraints.Max
+									return btn.Layout(gtx)
+								}),
+								layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+									maxX := gtx.Constraints.Min.X
+									maxY := gtx.Constraints.Min.Y
+									t := 1
+									if gtx.Dp(1) > 1 {
+										t = gtx.Dp(1)
+									}
+									paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, maxY-t), Max: image.Pt(maxX, maxY)}.Op())
+									paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(maxX-t, 0), Max: image.Pt(maxX, maxY)}.Op())
+									if rIdx == 0 {
+										paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(maxX, t)}.Op())
+									}
+									if j == 0 {
+										paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Min: image.Pt(0, 0), Max: image.Pt(t, maxY)}.Op())
+									}
+									return layout.Dimensions{Size: gtx.Constraints.Min}
+								}),
+							)
+						}))
+					}
 				}
-			}
-
-			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, children...)
-		})
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, children...)
+			})
+		}
+		listDims := layout.Flex{Axis: layout.Vertical}.Layout(gtx, rowChildren...)
 
 		passStack.Pop()
 		clipStack.Pop()
@@ -2119,6 +2214,57 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 				return lbl.Layout(gtx)
 			})
 			op.Defer(gtx.Ops, dragMacro.Stop())
+		}
+
+		if ui.TabCtxMenuOpen {
+			macro := op.Record(gtx.Ops)
+			op.Offset(image.Pt(int(ui.TabCtxMenuPos.X), int(ui.TabCtxMenuPos.Y))).Add(gtx.Ops)
+
+			menuItem := func(gtx layout.Context, clk *widget.Clickable, title string) layout.Dimensions {
+				return material.Clickable(gtx, clk, func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						gtx.Constraints.Min.X = gtx.Dp(unit.Dp(140))
+						lbl := material.Label(ui.Theme, unit.Sp(12), title)
+						return lbl.Layout(gtx)
+					})
+				})
+			}
+
+			rec := op.Record(gtx.Ops)
+			menuGtx := gtx
+			menuGtx.Constraints.Min = image.Point{}
+			menuGtx.Constraints.Max = image.Pt(gtx.Dp(unit.Dp(200)), gtx.Dp(unit.Dp(300)))
+			menuDims := layout.UniformInset(unit.Dp(4)).Layout(menuGtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return menuItem(gtx, &ui.TabCtxClose, "Close")
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return menuItem(gtx, &ui.TabCtxCloseOthers, "Close others")
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return menuItem(gtx, &ui.TabCtxCloseAll, "Close all")
+					}),
+				)
+			})
+			menuCall := rec.Stop()
+
+			sz := menuDims.Size
+			b := 1
+			if gtx.Dp(unit.Dp(1)) > 1 {
+				b = gtx.Dp(unit.Dp(1))
+			}
+			paint.FillShape(gtx.Ops, colorBorderLight,
+				clip.UniformRRect(image.Rectangle{Max: image.Pt(sz.X+b*2, sz.Y+b*2)}, 4).Op(gtx.Ops))
+			op.Offset(image.Pt(b, b)).Add(gtx.Ops)
+			paint.FillShape(gtx.Ops, colorBgPopup,
+				clip.UniformRRect(image.Rectangle{Max: sz}, 3).Op(gtx.Ops))
+			op.Offset(image.Pt(-b, -b)).Add(gtx.Ops)
+
+			menuCall.Add(gtx.Ops)
+
+			call := macro.Stop()
+			op.Defer(gtx.Ops, call)
 		}
 
 		return listDims
