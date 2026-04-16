@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"image"
+	"image/color"
 	"io"
 	"os"
 	"path/filepath"
@@ -134,6 +135,21 @@ type AppUI struct {
 	TabDragCurrentX  float32
 	TabDragPressTime time.Time
 	TabDragCurrentY  float32
+	LastPointerPos   f32.Point
+
+	VarHoverName      string
+	VarHoverPos       f32.Point
+	VarPopupOpen      bool
+	VarPopupName      string
+	VarPopupEnvID     string
+	VarPopupEditor    widget.Editor
+	VarPopupRange     struct{ Start, End int }
+	VarPopupSrcEditor *widget.Editor
+	VarPopupSave      widget.Clickable
+	VarPopupList      widget.List
+	VarPopupClicks    []widget.Clickable
+
+	PopupCloseTag  struct{}
 
 	tabWidthCache  map[*RequestTab]cachedTab
 	activeEnvVars  map[string]string
@@ -346,6 +362,21 @@ func (ui *AppUI) Run() error {
 		case app.ConfigEvent:
 			ui.IsMaximized = e.Config.Mode == app.Maximized || e.Config.Mode == app.Fullscreen
 		case app.FrameEvent:
+			// Global pointer tracking
+			for {
+				ev, ok := e.Source.Event(pointer.Filter{
+					Target: ui,
+					Kinds:  pointer.Move | pointer.Press,
+				})
+				if !ok {
+					break
+				}
+				if pe, ok := ev.(pointer.Event); ok {
+					ui.LastPointerPos = pe.Position
+				}
+			}
+			event.Op(&ops, pointer.Filter{Target: ui, Kinds: pointer.Move | pointer.Press})
+
 			for {
 				select {
 				case col := <-ui.ColLoadedChan:
@@ -1037,7 +1068,7 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 														}
 														children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 															if node.IsRenaming {
-																return TextField(gtx, ui.Theme, &node.NameEditor, "", false, 0, unit.Sp(12))
+																return TextField(gtx, ui.Theme, &node.NameEditor, "", false, nil, 0, unit.Sp(12))
 															}
 															lbl := material.Label(ui.Theme, unit.Sp(12), txt)
 															lbl.Alignment = text.Start
@@ -1055,7 +1086,7 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 														children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout))
 														children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 															if node.IsRenaming {
-																return TextField(gtx, ui.Theme, &node.NameEditor, "", false, 0, unit.Sp(12))
+																return TextField(gtx, ui.Theme, &node.NameEditor, "", false, nil, 0, unit.Sp(12))
 															}
 															lbl := material.Label(ui.Theme, unit.Sp(12), node.Name)
 															lbl.Alignment = text.Start
@@ -1098,6 +1129,14 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 										return layout.Stack{}.Layout(gtx,
 											layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 												paint.FillShape(gtx.Ops, colorBgPopup, clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 4).Op(gtx.Ops))
+												defer clip.Rect{Max: gtx.Constraints.Min}.Push(gtx.Ops).Pop()
+												event.Op(gtx.Ops, &node.MenuOpen)
+												for {
+													_, ok := gtx.Event(pointer.Filter{Target: &node.MenuOpen, Kinds: pointer.Press})
+													if !ok {
+														break
+													}
+												}
 												return layout.Dimensions{Size: gtx.Constraints.Min}
 											}),
 											layout.Stacked(func(gtx layout.Context) layout.Dimensions {
@@ -1340,7 +1379,10 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 }
 
 func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+	GlobalVarHover = nil
+	GlobalPointerPos = ui.LastPointerPos
+
+	dim := layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return ui.layoutTitleBar(gtx)
 		}),
@@ -1348,6 +1390,267 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 			return ui.layoutContent(gtx)
 		}),
 	)
+
+	// Handle popup/menu closing when clicking outside
+	anySidebarMenuOpen := false
+	for _, n := range ui.VisibleCols {
+		if n.MenuOpen {
+			anySidebarMenuOpen = true
+			break
+		}
+	}
+
+	if ui.TabCtxMenuOpen || anySidebarMenuOpen {
+		layout.Stack{}.Layout(gtx,
+			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+				defer clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops).Pop()
+				for {
+					ev, ok := gtx.Event(
+						pointer.Filter{Target: &ui.PopupCloseTag, Kinds: pointer.Press},
+						key.Filter{Name: key.NameEscape},
+					)
+					if !ok {
+						break
+					}
+					if pe, ok := ev.(pointer.Event); ok && pe.Kind == pointer.Press {
+						ui.TabCtxMenuOpen = false
+						ui.closeAllSidebarMenus()
+						ui.Window.Invalidate()
+					}
+					if ke, ok := ev.(key.Event); ok && ke.State == key.Press && ke.Name == key.NameEscape {
+						ui.TabCtxMenuOpen = false
+						ui.closeAllSidebarMenus()
+						ui.Window.Invalidate()
+					}
+				}
+				event.Op(gtx.Ops, &ui.PopupCloseTag)
+				return layout.Dimensions{Size: gtx.Constraints.Max}
+			}),
+		)
+	}
+
+	// Handle variable hover tooltip
+	if GlobalVarHover != nil && !ui.VarPopupOpen {
+		var val string
+		found := false
+		if ui.activeEnvVars != nil {
+			val, found = ui.activeEnvVars[GlobalVarHover.Name]
+		}
+
+		macro := op.Record(gtx.Ops)
+		op.Offset(image.Pt(int(GlobalVarHover.Pos.X)+10, int(GlobalVarHover.Pos.Y)+20)).Add(gtx.Ops)
+		
+		func(gtx layout.Context) layout.Dimensions {
+			return layout.Stack{}.Layout(gtx,
+				layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+					paint.FillShape(gtx.Ops, colorBgPopup, clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 4).Op(gtx.Ops))
+					return layout.Dimensions{Size: gtx.Constraints.Min}
+				}),
+				layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+					return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Label(ui.Theme, unit.Sp(10), GlobalVarHover.Name)
+								lbl.Color = colorFgMuted
+								lbl.Font.Weight = font.Bold
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								txt := val
+								col := colorWhite
+								if !found {
+									txt = "Not found in active environment"
+									col = colorDanger
+								}
+								lbl := material.Label(ui.Theme, unit.Sp(12), txt)
+								lbl.Color = col
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Label(ui.Theme, unit.Sp(9), "Right click to edit/select")
+								lbl.Color = colorAccent
+								return lbl.Layout(gtx)
+							}),
+						)
+					})
+				}),
+			)
+		}(gtx)
+		op.Defer(gtx.Ops, macro.Stop())
+
+		// Detect right click to open edit popup
+		for {
+			ev, ok := gtx.Event(pointer.Filter{
+				Target: ui,
+				Kinds:  pointer.Press,
+			})
+			if !ok {
+				break
+			}
+			_ = ev
+			if pe, ok := ev.(pointer.Event); ok && pe.Buttons.Contain(pointer.ButtonSecondary) {
+				ui.VarPopupOpen = true
+				ui.VarPopupName = GlobalVarHover.Name
+				ui.VarPopupEnvID = ui.ActiveEnvID
+				ui.VarPopupEditor.SetText(val)
+				ui.VarPopupRange = GlobalVarHover.Range
+				ui.VarPopupSrcEditor = GlobalVarHover.Editor
+				ui.Window.Invalidate()
+			}
+		}
+	}
+
+	// Handle variable edit/select popup
+	if ui.VarPopupOpen {
+		layout.Stack{}.Layout(gtx,
+			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+				paint.FillShape(gtx.Ops, color.NRGBA{A: 100}, clip.Rect{Max: gtx.Constraints.Max}.Op())
+				for {
+					_, ok := gtx.Event(pointer.Filter{
+						Target: &ui.VarPopupOpen,
+						Kinds:  pointer.Press,
+					})
+					if !ok {
+						break
+					}
+					ui.VarPopupOpen = false
+				}
+				event.Op(gtx.Ops, &ui.VarPopupOpen)
+				return layout.Dimensions{Size: gtx.Constraints.Max}
+			}),
+			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+				return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					gtx.Constraints.Min = image.Pt(gtx.Dp(350), 0)
+					gtx.Constraints.Max = image.Pt(gtx.Dp(450), gtx.Dp(500))
+					
+					return widget.Border{
+						Color: colorBorderLight,
+						CornerRadius: unit.Dp(8),
+						Width: unit.Dp(1),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Stack{}.Layout(gtx,
+							layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+								paint.FillShape(gtx.Ops, colorBgPopup, clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 8).Op(gtx.Ops))
+								return layout.Dimensions{Size: gtx.Constraints.Min}
+							}),
+							layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+								return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Label(ui.Theme, unit.Sp(14), "Variable: "+ui.VarPopupName)
+											lbl.Font.Weight = font.Bold
+											return lbl.Layout(gtx)
+										}),
+										layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Label(ui.Theme, unit.Sp(11), "Value in active environment:")
+											lbl.Color = colorFgMuted
+											return lbl.Layout(gtx)
+										}),
+										layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											return TextField(gtx, ui.Theme, &ui.VarPopupEditor, "Value", true, nil, 0, unit.Sp(12))
+										}),
+										layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											for ui.VarPopupSave.Clicked(gtx) {
+												if ui.VarPopupEnvID != "" {
+													for _, env := range ui.Environments {
+														if env.Data.ID == ui.VarPopupEnvID {
+															updated := false
+															for i, v := range env.Data.Vars {
+																if v.Key == ui.VarPopupName {
+																	env.Data.Vars[i].Value = ui.VarPopupEditor.Text()
+																	updated = true
+																	break
+																}
+															}
+															if !updated {
+																env.Data.Vars = append(env.Data.Vars, EnvVar{
+																	Key: ui.VarPopupName,
+																	Value: ui.VarPopupEditor.Text(),
+																	Enabled: true,
+																})
+															}
+															SaveEnvironment(env.Data)
+															ui.activeEnvDirty = true
+															break
+														}
+													}
+												}
+												ui.VarPopupOpen = false
+											}
+											btn := material.Button(ui.Theme, &ui.VarPopupSave, "Save Value")
+											btn.Background = colorAccent
+											btn.Inset = layout.UniformInset(unit.Dp(8))
+											return btn.Layout(gtx)
+										}),
+										layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Label(ui.Theme, unit.Sp(11), "Replace with other variable:")
+											lbl.Color = colorFgMuted
+											return lbl.Layout(gtx)
+										}),
+										layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+										layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+											var vars []string
+											if ui.activeEnvVars != nil {
+												for k := range ui.activeEnvVars {
+													if k != ui.VarPopupName {
+														vars = append(vars, k)
+													}
+												}
+											}
+											
+											if len(vars) == 0 {
+												lbl := material.Label(ui.Theme, unit.Sp(11), "No other variables available")
+												lbl.Color = colorFgDim
+												return lbl.Layout(gtx)
+											}
+
+											if len(ui.VarPopupClicks) < len(vars) {
+												ui.VarPopupClicks = make([]widget.Clickable, len(vars))
+											}
+
+											return material.List(ui.Theme, &ui.VarPopupList).Layout(gtx, len(vars), func(gtx layout.Context, i int) layout.Dimensions {
+												name := vars[i]
+												for ui.VarPopupClicks[i].Clicked(gtx) {
+													if ui.VarPopupSrcEditor != nil {
+														txt := ui.VarPopupSrcEditor.Text()
+														newTxt := txt[:ui.VarPopupRange.Start] + "{{" + name + "}}" + txt[ui.VarPopupRange.End:]
+														ui.VarPopupSrcEditor.SetText(newTxt)
+														ui.saveState()
+													}
+													ui.VarPopupOpen = false
+												}
+												
+												return material.Clickable(gtx, &ui.VarPopupClicks[i], func(gtx layout.Context) layout.Dimensions {
+													return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+														bg := colorTransparent
+														if ui.VarPopupClicks[i].Hovered() {
+															bg = colorBgHover
+														}
+														rect := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 4)
+														paint.FillShape(gtx.Ops, bg, rect.Op(gtx.Ops))
+														
+														lbl := material.Label(ui.Theme, unit.Sp(12), name)
+														return lbl.Layout(gtx)
+													})
+												})
+											})
+										}),
+									)
+								})
+							}),
+						)
+					})
+				})
+			}),
+		)
+	}
+
+	return dim
 }
 
 func (ui *AppUI) layoutEnvEditor(gtx layout.Context) layout.Dimensions {
@@ -1416,7 +1719,7 @@ func (ui *AppUI) layoutEnvEditor(gtx layout.Context) layout.Dimensions {
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return TextField(gtx, ui.Theme, &env.NameEditor, "Environment Name", true, 0, unit.Sp(12))
+						return TextField(gtx, ui.Theme, &env.NameEditor, "Environment Name", true, nil, 0, unit.Sp(12))
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1486,11 +1789,11 @@ func (ui *AppUI) layoutEnvEditor(gtx layout.Context) layout.Dimensions {
 								return material.CheckBox(ui.Theme, &r.Enabled, "").Layout(gtx)
 							}),
 							layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-								return TextField(gtx, ui.Theme, &r.KeyEditor, "Key", true, 0, unit.Sp(12))
+								return TextField(gtx, ui.Theme, &r.KeyEditor, "Key", true, nil, 0, unit.Sp(12))
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 							layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
-								return TextField(gtx, ui.Theme, &r.ValEditor, "Value", true, 0, unit.Sp(12))
+								return TextField(gtx, ui.Theme, &r.ValEditor, "Value", true, nil, 0, unit.Sp(12))
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1516,6 +1819,12 @@ func (ui *AppUI) layoutEnvEditor(gtx layout.Context) layout.Dimensions {
 			}),
 		)
 	})
+}
+
+func (ui *AppUI) closeAllSidebarMenus() {
+	for _, n := range ui.VisibleCols {
+		n.MenuOpen = false
+	}
 }
 
 func (ui *AppUI) closeTab(idx int) {
@@ -1670,116 +1979,180 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 		ui.saveState()
 	}
 
-	dims := layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Min.X = ui.SidebarWidth
-			gtx.Constraints.Max.X = ui.SidebarWidth
-			return ui.layoutSidebar(gtx)
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			size := image.Point{X: gtx.Dp(unit.Dp(4)), Y: gtx.Constraints.Min.Y}
-			rect := clip.Rect{Max: size}
-			defer rect.Push(gtx.Ops).Pop()
-			pointer.CursorColResize.Add(gtx.Ops)
-			ui.SidebarDrag.Add(gtx.Ops)
-			paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Max: size}.Op())
-			return layout.Dimensions{Size: size}
-		}),
-		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			if ui.EditingEnv != nil {
-				return ui.layoutEnvEditor(gtx)
-			}
-
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+	return layout.Stack{}.Layout(gtx,
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return ui.layoutTabBar(gtx)
+					gtx.Constraints.Min.X = ui.SidebarWidth
+					gtx.Constraints.Max.X = ui.SidebarWidth
+					return ui.layoutSidebar(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					size := image.Point{X: gtx.Dp(unit.Dp(4)), Y: gtx.Constraints.Min.Y}
+					rect := clip.Rect{Max: size}
+					defer rect.Push(gtx.Ops).Pop()
+					pointer.CursorColResize.Add(gtx.Ops)
+					ui.SidebarDrag.Add(gtx.Ops)
+					paint.FillShape(gtx.Ops, colorBorder, clip.Rect{Max: size}.Op())
+					return layout.Dimensions{Size: size}
 				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					if len(ui.Tabs) > 0 && ui.ActiveIdx < len(ui.Tabs) {
-						tab := ui.Tabs[ui.ActiveIdx]
-
-						for tab.SendBtn.Clicked(gtx) {
-							tab.SendMenuOpen = false
-							tab.executeRequest(ui.Window, ui.activeEnvVars)
-							ui.saveState()
-						}
-						if tab.URLSubmitted {
-							tab.URLSubmitted = false
-							tab.SendMenuOpen = false
-							tab.executeRequest(ui.Window, ui.activeEnvVars)
-							ui.saveState()
-						}
-						for tab.CancelBtn.Clicked(gtx) {
-							tab.cancelRequest()
-						}
-						for tab.SaveToFileBtn.Clicked(gtx) {
-							tab.SendMenuOpen = false
-							go func() {
-								w, err := ui.Explorer.CreateFile("response.json")
-								if err != nil || w == nil {
-									return
-								}
-								tab.FileSaveChan <- w
-								ui.Window.Invalidate()
-							}()
-						}
-						select {
-						case w := <-tab.FileSaveChan:
-							if f, ok := w.(*os.File); ok {
-								tab.SaveToFilePath = f.Name()
-							}
-							tab.executeRequestToFile(ui.Window, ui.activeEnvVars, w)
-						default:
-						}
-
-						isDragging := ui.SidebarDrag.Dragging() || ui.SidebarEnvDrag.Dragging()
-						return tab.layout(gtx, ui.Theme, ui.Window, ui.activeEnvVars, isDragging, func() {
-							ui.saveState()
-						})
+					if ui.EditingEnv != nil {
+						return ui.layoutEnvEditor(gtx)
 					}
-					
-					// Empty state
-					return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								gtx.Constraints.Min = image.Point{X: gtx.Dp(unit.Dp(64)), Y: gtx.Dp(unit.Dp(64))}
-								return iconSearch.Layout(gtx, colorFgMuted)
-							}),
-							layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.Theme, unit.Sp(16), "No request selected")
-								lbl.Color = colorFgMuted
-								return lbl.Layout(gtx)
-							}),
-							layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.Theme, unit.Sp(14), "Select one from the sidebar or click '+' to create a new one")
-								lbl.Color = colorFgDim
-								return lbl.Layout(gtx)
-							}),
-							layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								if ui.AddTabBtn.Clicked(gtx) {
-									ui.TabCtxMenuOpen = false
-									newTab := NewRequestTab("New request")
-									ui.Tabs = append(ui.Tabs, newTab)
-									ui.ActiveIdx = len(ui.Tabs) - 1
+
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return ui.layoutTabBar(gtx)
+						}),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							if len(ui.Tabs) > 0 && ui.ActiveIdx < len(ui.Tabs) {
+								tab := ui.Tabs[ui.ActiveIdx]
+
+								for tab.SendBtn.Clicked(gtx) {
+									tab.SendMenuOpen = false
+									tab.executeRequest(ui.Window, ui.activeEnvVars)
+									ui.saveState()
 								}
-								btn := material.Button(ui.Theme, &ui.AddTabBtn, "Create Request")
-								btn.Background = colorAccent
-								btn.Color = ui.Theme.Palette.ContrastFg
-								btn.TextSize = unit.Sp(14)
-								btn.Inset = layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(16), Right: unit.Dp(16)}
-								return btn.Layout(gtx)
-							}),
-						)
-					})
+								if tab.URLSubmitted {
+									tab.URLSubmitted = false
+									tab.SendMenuOpen = false
+									tab.executeRequest(ui.Window, ui.activeEnvVars)
+									ui.saveState()
+								}
+								for tab.CancelBtn.Clicked(gtx) {
+									tab.cancelRequest()
+								}
+								for tab.SaveToFileBtn.Clicked(gtx) {
+									tab.SendMenuOpen = false
+									go func() {
+										w, err := ui.Explorer.CreateFile("response.json")
+										if err != nil || w == nil {
+											return
+										}
+										tab.FileSaveChan <- w
+										ui.Window.Invalidate()
+									}()
+								}
+								select {
+								case w := <-tab.FileSaveChan:
+									if f, ok := w.(*os.File); ok {
+										tab.SaveToFilePath = f.Name()
+									}
+									tab.executeRequestToFile(ui.Window, ui.activeEnvVars, w)
+								default:
+								}
+
+								isDragging := ui.SidebarDrag.Dragging() || ui.SidebarEnvDrag.Dragging()
+								return tab.layout(gtx, ui.Theme, ui.Window, ui.activeEnvVars, isDragging, func() {
+									ui.saveState()
+								})
+							}
+
+							return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										gtx.Constraints.Min = image.Point{X: gtx.Dp(unit.Dp(64)), Y: gtx.Dp(unit.Dp(64))}
+										return iconSearch.Layout(gtx, colorFgMuted)
+									}),
+									layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Label(ui.Theme, unit.Sp(16), "No request selected")
+										lbl.Color = colorFgMuted
+										return lbl.Layout(gtx)
+									}),
+									layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Label(ui.Theme, unit.Sp(14), "Select one from the sidebar or click '+' to create a new one")
+										lbl.Color = colorFgDim
+										return lbl.Layout(gtx)
+									}),
+									layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if ui.AddTabBtn.Clicked(gtx) {
+											ui.TabCtxMenuOpen = false
+											newTab := NewRequestTab("New request")
+											ui.Tabs = append(ui.Tabs, newTab)
+											ui.ActiveIdx = len(ui.Tabs) - 1
+										}
+										btn := material.Button(ui.Theme, &ui.AddTabBtn, "Create Request")
+										btn.Background = colorAccent
+										btn.Color = ui.Theme.Palette.ContrastFg
+										btn.TextSize = unit.Sp(14)
+										btn.Inset = layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(16), Right: unit.Dp(16)}
+										return btn.Layout(gtx)
+									}),
+								)
+							})
+						}),
+					)
 				}),
 			)
 		}),
-	)
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if !ui.TabCtxMenuOpen {
+				return layout.Dimensions{}
+			}
 
-	return dims
+			macro := op.Record(gtx.Ops)
+			// Offset relative to layoutContent: 
+			// X: sidebar (width) + splitter (4) + tab bar inset (4) = sidebar + 8
+			// Y: tab bar inset (8)
+			offX := int(ui.TabCtxMenuPos.X) + ui.SidebarWidth + gtx.Dp(unit.Dp(8))
+			offY := int(ui.TabCtxMenuPos.Y) + gtx.Dp(unit.Dp(8))
+			op.Offset(image.Pt(offX, offY)).Add(gtx.Ops)
+
+			menuItem := func(gtx layout.Context, clk *widget.Clickable, title string) layout.Dimensions {
+				return material.Clickable(gtx, clk, func(gtx layout.Context) layout.Dimensions {
+					if clk.Hovered() {
+						paint.FillShape(gtx.Ops, colorBgHover, clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 4).Op(gtx.Ops))
+					}
+					return layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						gtx.Constraints.Min.X = gtx.Dp(unit.Dp(140))
+						lbl := material.Label(ui.Theme, unit.Sp(12), title)
+						return lbl.Layout(gtx)
+					})
+				})
+			}
+
+			rec := op.Record(gtx.Ops)
+			menuGtx := gtx
+			menuGtx.Constraints.Min = image.Point{}
+			menuGtx.Constraints.Max = image.Pt(gtx.Dp(unit.Dp(200)), gtx.Dp(unit.Dp(300)))
+			menuDims := layout.UniformInset(unit.Dp(4)).Layout(menuGtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return menuItem(gtx, &ui.TabCtxClose, "Close")
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return menuItem(gtx, &ui.TabCtxCloseOthers, "Close others")
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return menuItem(gtx, &ui.TabCtxCloseAll, "Close all")
+					}),
+				)
+			})
+			menuCall := rec.Stop()
+
+			sz := menuDims.Size
+			b := 1
+			if gtx.Dp(unit.Dp(1)) > 1 {
+				b = gtx.Dp(unit.Dp(1))
+			}
+			paint.FillShape(gtx.Ops, colorBorderLight,
+				clip.UniformRRect(image.Rectangle{Max: image.Pt(sz.X+b*2, sz.Y+b*2)}, 4).Op(gtx.Ops))
+			op.Offset(image.Pt(b, b)).Add(gtx.Ops)
+			paint.FillShape(gtx.Ops, colorBgPopup,
+				clip.UniformRRect(image.Rectangle{Max: sz}, 3).Op(gtx.Ops))
+			op.Offset(image.Pt(-b, -b)).Add(gtx.Ops)
+
+			menuCall.Add(gtx.Ops)
+			call := macro.Stop()
+			op.Defer(gtx.Ops, call)
+
+			return layout.Dimensions{}
+		}),
+	)
 }
 
 func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
@@ -1792,7 +2165,11 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 		tabHeight := gtx.Dp(unit.Dp(36))
 		closeBtnWidth := gtx.Dp(unit.Dp(28))
 		addBtnW := gtx.Dp(unit.Dp(36))
-		maxWidth := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(4))
+		// We subtract 2px to ensure the right border of the last tab is always visible and not clipped.
+		maxWidth := gtx.Constraints.Max.X - 2
+		if maxWidth < 0 {
+			maxWidth = 0
+		}
 
 		tabs := ui.tabInfoBuf[:0]
 		for i, tab := range ui.Tabs {
@@ -1833,6 +2210,22 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 
 		for rIdx, row := range rows {
 			isLastRow := rIdx == len(rows)-1
+			
+			rowTabsNatW := 0
+			rowHasAddBtn := false
+			for _, i := range row {
+				if i >= 0 {
+					rowTabsNatW += tabs[i].NatWidth
+				} else {
+					rowHasAddBtn = true
+				}
+			}
+
+			rowTotalNatW := rowTabsNatW
+			if rowHasAddBtn {
+				rowTotalNatW += addBtnW
+			}
+
 			if isLastRow {
 				for _, i := range row {
 					if i >= 0 {
@@ -1842,26 +2235,24 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 				continue
 			}
 
-			rowNatW := 0
-			lastTabIdx := -1
-			for j, i := range row {
-				if i >= 0 {
-					rowNatW += tabs[i].NatWidth
-					lastTabIdx = j
-				} else {
-					rowNatW += addBtnW
-				}
-			}
-
-			extraSpace := maxWidth - rowNatW
-			if extraSpace > 0 && rowNatW > 0 {
+			extraSpace := maxWidth - rowTotalNatW
+			if extraSpace > 0 && rowTabsNatW > 0 {
 				allocated := 0
+				lastTabInRowIdx := -1
 				for j, i := range row {
 					if i >= 0 {
-						share := float32(tabs[i].NatWidth) / float32(rowNatW)
-						add := int(float32(extraSpace) * share)
-						if j == lastTabIdx {
+						lastTabInRowIdx = j
+					}
+				}
+
+				for j, i := range row {
+					if i >= 0 {
+						var add int
+						if j == lastTabInRowIdx {
 							add = extraSpace - allocated
+						} else {
+							share := float32(tabs[i].NatWidth) / float32(rowTabsNatW)
+							add = int(float32(extraSpace) * share)
 						}
 						allocated += add
 						tabs[i].FinalWidth = tabs[i].NatWidth + add
@@ -1889,10 +2280,12 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 			row := rows[rowIdx]
 			acc := float32(0)
 			for _, tIdx := range row {
+				var w float32
 				if tIdx < 0 {
-					continue
+					w = float32(addBtnW)
+				} else {
+					w = float32(tabs[tIdx].FinalWidth)
 				}
-				w := float32(tabs[tIdx].FinalWidth)
 				if x < acc+w {
 					return tIdx
 				}
@@ -2043,21 +2436,6 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 									ui.ActiveIdx = idx
 									ui.TabCtxMenuOpen = false
 									ui.revealLinkedNode(tab)
-								}
-							}
-
-							for {
-								ev, ok := gtx.Event(pointer.Filter{
-									Target: &tab.TabBtn,
-									Kinds:  pointer.Press,
-								})
-								if !ok {
-									break
-								}
-								if pe, ok := ev.(pointer.Event); ok && pe.Buttons.Contain(pointer.ButtonSecondary) {
-									ui.TabCtxMenuOpen = true
-									ui.TabCtxMenuIdx = idx
-									ui.TabCtxMenuPos = pe.Position
 								}
 							}
 
@@ -2214,57 +2592,6 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 				return lbl.Layout(gtx)
 			})
 			op.Defer(gtx.Ops, dragMacro.Stop())
-		}
-
-		if ui.TabCtxMenuOpen {
-			macro := op.Record(gtx.Ops)
-			op.Offset(image.Pt(int(ui.TabCtxMenuPos.X), int(ui.TabCtxMenuPos.Y))).Add(gtx.Ops)
-
-			menuItem := func(gtx layout.Context, clk *widget.Clickable, title string) layout.Dimensions {
-				return material.Clickable(gtx, clk, func(gtx layout.Context) layout.Dimensions {
-					return layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						gtx.Constraints.Min.X = gtx.Dp(unit.Dp(140))
-						lbl := material.Label(ui.Theme, unit.Sp(12), title)
-						return lbl.Layout(gtx)
-					})
-				})
-			}
-
-			rec := op.Record(gtx.Ops)
-			menuGtx := gtx
-			menuGtx.Constraints.Min = image.Point{}
-			menuGtx.Constraints.Max = image.Pt(gtx.Dp(unit.Dp(200)), gtx.Dp(unit.Dp(300)))
-			menuDims := layout.UniformInset(unit.Dp(4)).Layout(menuGtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return menuItem(gtx, &ui.TabCtxClose, "Close")
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return menuItem(gtx, &ui.TabCtxCloseOthers, "Close others")
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return menuItem(gtx, &ui.TabCtxCloseAll, "Close all")
-					}),
-				)
-			})
-			menuCall := rec.Stop()
-
-			sz := menuDims.Size
-			b := 1
-			if gtx.Dp(unit.Dp(1)) > 1 {
-				b = gtx.Dp(unit.Dp(1))
-			}
-			paint.FillShape(gtx.Ops, colorBorderLight,
-				clip.UniformRRect(image.Rectangle{Max: image.Pt(sz.X+b*2, sz.Y+b*2)}, 4).Op(gtx.Ops))
-			op.Offset(image.Pt(b, b)).Add(gtx.Ops)
-			paint.FillShape(gtx.Ops, colorBgPopup,
-				clip.UniformRRect(image.Rectangle{Max: sz}, 3).Op(gtx.Ops))
-			op.Offset(image.Pt(-b, -b)).Add(gtx.Ops)
-
-			menuCall.Add(gtx.Ops)
-
-			call := macro.Stop()
-			op.Defer(gtx.Ops, call)
 		}
 
 		return listDims

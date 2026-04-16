@@ -3,8 +3,11 @@ package ui
 import (
 	"image"
 	"strings"
+	"unicode"
 
+	"github.com/nanorele/gio/f32"
 	"github.com/nanorele/gio/font"
+	"github.com/nanorele/gio/io/key"
 	"github.com/nanorele/gio/layout"
 	"github.com/nanorele/gio/op"
 	"github.com/nanorele/gio/op/clip"
@@ -104,6 +107,16 @@ func getLineMetrics(gtx layout.Context, th *material.Theme, textSize unit.Sp) (i
 	return lineHeight, lineSpacing
 }
 
+type VarHoverState struct {
+	Name   string
+	Pos    f32.Point
+	Editor *widget.Editor
+	Range  struct{ Start, End int }
+}
+
+var GlobalVarHover *VarHoverState
+var GlobalPointerPos f32.Point
+
 func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, env map[string]string, frozenWidth int, textSize unit.Sp) layout.Dimensions {
 	ed.SingleLine = true
 	ed.Submit = true
@@ -185,6 +198,18 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 					yOff := lineIdx * lineSpacing
 					rect := image.Rect(x1, yOff-padY, x2, yOff+lineHeight+padY)
 					paint.FillShape(gtx.Ops, bgColor, clip.UniformRRect(rect, cornerR).Op(gtx.Ops))
+
+					// Detect hover
+					ptrPos := GlobalPointerPos
+					if ptrPos.X >= float32(x1+pX) && ptrPos.X <= float32(x2+pX) &&
+						ptrPos.Y >= float32(yOff+pY-padY) && ptrPos.Y <= float32(yOff+lineHeight+pY+padY) {
+						GlobalVarHover = &VarHoverState{
+							Name:   varName,
+							Pos:    ptrPos,
+							Editor: ed,
+							Range:  struct{ Start, End int }{Start: start, End: end},
+						}
+					}
 				}
 
 				idx = end
@@ -196,6 +221,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	e := material.Editor(th, ed, hint)
 	e.TextSize = textSize
 	e.Font = monoFont
+	handleEditorShortcuts(gtx, ed)
 	dims := e.Layout(edGtx)
 	call := macro.Stop()
 
@@ -213,8 +239,12 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	paint.FillShape(gtx.Ops, colorBgField, rect.Op(gtx.Ops))
 
 	if drawBorder {
+		borderColor := colorBorderLight
+		if gtx.Focused(ed) {
+			borderColor = colorAccent
+		}
 		border := widget.Border{
-			Color:        colorBorderLight,
+			Color:        borderColor,
 			CornerRadius: unit.Dp(2),
 			Width:        unit.Dp(1),
 		}
@@ -233,7 +263,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	return layout.Dimensions{Size: finalSize, Baseline: dims.Baseline + pY}
 }
 
-func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, frozenWidth int, textSize unit.Sp) layout.Dimensions {
+func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint string, drawBorder bool, env map[string]string, frozenWidth int, textSize unit.Sp) layout.Dimensions {
 	ed.SingleLine = true
 	ed.Submit = true
 	p := gtx.Dp(unit.Dp(4))
@@ -255,8 +285,88 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 
 	macro := op.Record(gtx.Ops)
 	op.Offset(image.Point{X: p, Y: p}).Add(gtx.Ops)
+
+	lineHeight, lineSpacing := getLineMetrics(gtx, th, textSize)
+	scrollX := ed.GetScrollX()
+
+	if ed.Len() >= 4 && env != nil {
+		textStr := ed.Text()
+		if strings.Contains(textStr, "{{") {
+			padY := gtx.Dp(unit.Dp(2))
+
+			lineStarts := []int{0}
+			for i := 0; i < len(textStr); i++ {
+				if textStr[i] == '\n' {
+					lineStarts = append(lineStarts, i+1)
+				}
+			}
+
+			totalHeight := len(lineStarts)*lineSpacing + lineHeight
+			cl := clip.Rect{
+				Min: image.Pt(0, -padY),
+				Max: image.Pt(edGtx.Constraints.Max.X, totalHeight+padY),
+			}.Push(gtx.Ops)
+
+			cornerR := gtx.Dp(unit.Dp(3))
+			idx := 0
+			for idx < len(textStr) {
+				start := strings.Index(textStr[idx:], "{{")
+				if start == -1 {
+					break
+				}
+				start += idx
+				end := strings.Index(textStr[start+2:], "}}")
+				if end == -1 {
+					break
+				}
+				end = start + 2 + end + 2
+
+				varName := strings.TrimSpace(textStr[start+2 : end-2])
+
+				lineIdx := 0
+				for lineIdx+1 < len(lineStarts) && lineStarts[lineIdx+1] <= start {
+					lineIdx++
+				}
+				lineStart := lineStarts[lineIdx]
+
+				pWidth := measureTextWidth(gtx, th, textSize, monoFont, textStr[lineStart:start])
+				vWidth := measureTextWidth(gtx, th, textSize, monoFont, textStr[start:end])
+
+				bgColor := colorVarMissing
+				if _, ok := env[varName]; ok {
+					bgColor = colorVarFound
+				}
+
+				x1 := pWidth - scrollX
+				x2 := x1 + vWidth
+				if x2 > 0 && x1 < edGtx.Constraints.Max.X {
+					yOff := lineIdx * lineSpacing
+					rect := image.Rect(x1, yOff-padY, x2, yOff+lineHeight+padY)
+					paint.FillShape(gtx.Ops, bgColor, clip.UniformRRect(rect, cornerR).Op(gtx.Ops))
+
+					// Detect hover
+					ptrPos := GlobalPointerPos
+					if ptrPos.X >= float32(x1+p) && ptrPos.X <= float32(x2+p) &&
+						ptrPos.Y >= float32(yOff+p-padY) && ptrPos.Y <= float32(yOff+lineHeight+p+padY) {
+						GlobalVarHover = &VarHoverState{
+							Name:   varName,
+							Pos:    ptrPos,
+							Editor: ed,
+							Range:  struct{ Start, End int }{Start: start, End: end},
+						}
+					}
+				}
+
+				idx = end
+			}
+			cl.Pop()
+		}
+	}
+
 	e := material.Editor(th, ed, hint)
 	e.TextSize = textSize
+	e.Font = monoFont
+	handleEditorShortcuts(gtx, ed)
 	dims := e.Layout(edGtx)
 	call := macro.Stop()
 
@@ -274,8 +384,12 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 	paint.FillShape(gtx.Ops, colorBgField, rect.Op(gtx.Ops))
 
 	if drawBorder {
+		borderColor := colorBorderLight
+		if gtx.Focused(ed) {
+			borderColor = colorAccent
+		}
 		border := widget.Border{
-			Color:        colorBorderLight,
+			Color:        borderColor,
 			CornerRadius: unit.Dp(2),
 			Width:        unit.Dp(1),
 		}
@@ -296,12 +410,16 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 
 func SquareBtn(gtx layout.Context, clk *widget.Clickable, ic *widget.Icon, th *material.Theme) layout.Dimensions {
 	return clk.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		size := gtx.Dp(unit.Dp(26))
+		size := gtx.Dp(unit.Dp(28))
 		gtx.Constraints.Min = image.Point{X: size, Y: size}
 		gtx.Constraints.Max = gtx.Constraints.Min
 
 		rect := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 2)
-		paint.FillShape(gtx.Ops, colorBgField, rect.Op(gtx.Ops))
+		bg := colorBgField
+		if clk.Hovered() {
+			bg = colorBgHover
+		}
+		paint.FillShape(gtx.Ops, bg, rect.Op(gtx.Ops))
 
 		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			gtx.Constraints.Min = image.Point{X: gtx.Dp(unit.Dp(16)), Y: gtx.Dp(unit.Dp(16))}
@@ -330,4 +448,68 @@ func menuOption(gtx layout.Context, th *material.Theme, clk *widget.Clickable, t
 			)
 		})
 	})
+}
+
+func isSeparator(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune(".,:;!?-()[]{}", r)
+}
+
+func moveWord(s string, pos int, dir int) int {
+	runes := []rune(s)
+	if dir > 0 {
+		if pos >= len(runes) {
+			return len(runes)
+		}
+		i := pos
+		// Skip initial separator
+		for i < len(runes) && isSeparator(runes[i]) {
+			i++
+		}
+		// Skip word
+		for i < len(runes) && !isSeparator(runes[i]) {
+			i++
+		}
+		return i
+	} else {
+		if pos <= 0 {
+			return 0
+		}
+		i := pos - 1
+		// Skip initial separator
+		for i >= 0 && isSeparator(runes[i]) {
+			i--
+		}
+		// Skip word
+		for i >= 0 && !isSeparator(runes[i]) {
+			i--
+		}
+		return i + 1
+	}
+}
+
+func handleEditorShortcuts(gtx layout.Context, ed *widget.Editor) {
+	for {
+		ev, ok := gtx.Event(
+			key.Filter{Focus: ed, Name: key.NameLeftArrow, Required: key.ModShortcut},
+			key.Filter{Focus: ed, Name: key.NameRightArrow, Required: key.ModShortcut},
+		)
+		if !ok {
+			break
+		}
+		e, ok := ev.(key.Event)
+		if !ok || e.State != key.Press {
+			continue
+		}
+
+		switch e.Name {
+		case key.NameLeftArrow:
+			start, _ := ed.Selection()
+			newPos := moveWord(ed.Text(), start, -1)
+			ed.SetCaret(newPos, newPos)
+		case key.NameRightArrow:
+			_, end := ed.Selection()
+			newPos := moveWord(ed.Text(), end, 1)
+			ed.SetCaret(newPos, newPos)
+		}
+	}
 }

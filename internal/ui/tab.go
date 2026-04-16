@@ -1125,7 +1125,7 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 										return layout.Inset{Left: unit.Dp(4), Right: unit.Dp(4), Top: unit.Dp(2), Bottom: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 											return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 												layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-													return TextField(gtx, th, &t.SearchEditor, "Search...", true, 0, unit.Sp(11))
+													return TextField(gtx, th, &t.SearchEditor, "Search...", true, nil, 0, unit.Sp(11))
 												}),
 												layout.Rigid(layout.Spacer{Width: unit.Dp(2)}.Layout),
 												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
