@@ -7,7 +7,9 @@ import (
 
 	"github.com/nanorele/gio/f32"
 	"github.com/nanorele/gio/font"
+	"github.com/nanorele/gio/io/event"
 	"github.com/nanorele/gio/io/key"
+	"github.com/nanorele/gio/io/pointer"
 	"github.com/nanorele/gio/layout"
 	"github.com/nanorele/gio/op"
 	"github.com/nanorele/gio/op/clip"
@@ -114,6 +116,12 @@ type VarHoverState struct {
 	Range  struct{ Start, End int }
 }
 
+type varClickTag struct {
+	ed    *widget.Editor
+	start int
+}
+
+var GlobalVarClick *VarHoverState
 var GlobalVarHover *VarHoverState
 var GlobalPointerPos f32.Point
 
@@ -143,6 +151,13 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 
 	lineHeight, lineSpacing := getLineMetrics(gtx, th, textSize)
 	scrollX := ed.GetScrollX()
+
+	type varRectInfo struct {
+		name       string
+		rect       image.Rectangle
+		start, end int
+	}
+	var varRects []varRectInfo
 
 	if ed.Len() >= 4 && env != nil {
 		textStr := ed.Text()
@@ -199,7 +214,14 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 					rect := image.Rect(x1, yOff-padY, x2, yOff+lineHeight+padY)
 					paint.FillShape(gtx.Ops, bgColor, clip.UniformRRect(rect, cornerR).Op(gtx.Ops))
 
-					// Detect hover
+					varRects = append(varRects, varRectInfo{
+						name:  varName,
+						rect:  rect,
+						start: start,
+						end:   end,
+					})
+
+					// Detect hover visually as before
 					ptrPos := GlobalPointerPos
 					if ptrPos.X >= float32(x1+pX) && ptrPos.X <= float32(x2+pX) &&
 						ptrPos.Y >= float32(yOff+pY-padY) && ptrPos.Y <= float32(yOff+lineHeight+pY+padY) {
@@ -260,6 +282,40 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	call.Add(gtx.Ops)
 	textClip.Pop()
 
+	if len(varRects) > 0 {
+		macroClick := op.Record(gtx.Ops)
+		op.Offset(image.Point{X: pX, Y: pY}).Add(gtx.Ops)
+		for _, vr := range varRects {
+			tag := varClickTag{ed: ed, start: vr.start}
+			stack := clip.Rect(vr.rect).Push(gtx.Ops)
+			pointer.CursorPointer.Add(gtx.Ops)
+			event.Op(gtx.Ops, tag)
+			for {
+				ev, ok := gtx.Event(pointer.Filter{
+					Target: tag,
+					Kinds:  pointer.Press,
+				})
+				if !ok {
+					break
+				}
+				if pe, ok := ev.(pointer.Event); ok && pe.Buttons.Contain(pointer.ButtonPrimary) {
+					GlobalVarClick = &VarHoverState{
+						Name:   vr.name,
+						Pos:    GlobalPointerPos,
+						Editor: ed,
+						Range:  struct{ Start, End int }{vr.start, vr.end},
+					}
+				}
+			}
+			stack.Pop()
+		}
+		callClick := macroClick.Stop()
+
+		textClipClick := clip.Rect{Max: finalSize}.Push(gtx.Ops)
+		callClick.Add(gtx.Ops)
+		textClipClick.Pop()
+	}
+
 	return layout.Dimensions{Size: finalSize, Baseline: dims.Baseline + pY}
 }
 
@@ -288,6 +344,13 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 
 	lineHeight, lineSpacing := getLineMetrics(gtx, th, textSize)
 	scrollX := ed.GetScrollX()
+
+	type varRectInfo struct {
+		name       string
+		rect       image.Rectangle
+		start, end int
+	}
+	var varRects []varRectInfo
 
 	if ed.Len() >= 4 && env != nil {
 		textStr := ed.Text()
@@ -343,6 +406,13 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 					yOff := lineIdx * lineSpacing
 					rect := image.Rect(x1, yOff-padY, x2, yOff+lineHeight+padY)
 					paint.FillShape(gtx.Ops, bgColor, clip.UniformRRect(rect, cornerR).Op(gtx.Ops))
+
+					varRects = append(varRects, varRectInfo{
+						name:  varName,
+						rect:  rect,
+						start: start,
+						end:   end,
+					})
 
 					// Detect hover
 					ptrPos := GlobalPointerPos
@@ -404,6 +474,40 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 	textClip := clip.Rect{Max: finalSize}.Push(gtx.Ops)
 	call.Add(gtx.Ops)
 	textClip.Pop()
+
+	if len(varRects) > 0 {
+		macroClick := op.Record(gtx.Ops)
+		op.Offset(image.Point{X: p, Y: p}).Add(gtx.Ops)
+		for _, vr := range varRects {
+			tag := varClickTag{ed: ed, start: vr.start}
+			stack := clip.Rect(vr.rect).Push(gtx.Ops)
+			pointer.CursorPointer.Add(gtx.Ops)
+			event.Op(gtx.Ops, tag)
+			for {
+				ev, ok := gtx.Event(pointer.Filter{
+					Target: tag,
+					Kinds:  pointer.Press,
+				})
+				if !ok {
+					break
+				}
+				if pe, ok := ev.(pointer.Event); ok && pe.Buttons.Contain(pointer.ButtonPrimary) {
+					GlobalVarClick = &VarHoverState{
+						Name:   vr.name,
+						Pos:    GlobalPointerPos,
+						Editor: ed,
+						Range:  struct{ Start, End int }{vr.start, vr.end},
+					}
+				}
+			}
+			stack.Pop()
+		}
+		callClick := macroClick.Stop()
+
+		textClipClick := clip.Rect{Max: finalSize}.Push(gtx.Ops)
+		callClick.Add(gtx.Ops)
+		textClipClick.Pop()
+	}
 
 	return layout.Dimensions{Size: finalSize, Baseline: dims.Baseline + p}
 }

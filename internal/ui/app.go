@@ -1468,7 +1468,7 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 							}),
 							layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.Theme, unit.Sp(9), "Right click to edit/select")
+								lbl := material.Label(ui.Theme, unit.Sp(9), "Click to edit/select")
 								lbl.Color = colorAccent
 								return lbl.Layout(gtx)
 							}),
@@ -1478,27 +1478,22 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 			)
 		}(gtx)
 		op.Defer(gtx.Ops, macro.Stop())
+	}
 
-		// Detect right click to open edit popup
-		for {
-			ev, ok := gtx.Event(pointer.Filter{
-				Target: ui,
-				Kinds:  pointer.Press,
-			})
-			if !ok {
-				break
-			}
-			_ = ev
-			if pe, ok := ev.(pointer.Event); ok && pe.Buttons.Contain(pointer.ButtonSecondary) {
-				ui.VarPopupOpen = true
-				ui.VarPopupName = GlobalVarHover.Name
-				ui.VarPopupEnvID = ui.ActiveEnvID
-				ui.VarPopupEditor.SetText(val)
-				ui.VarPopupRange = GlobalVarHover.Range
-				ui.VarPopupSrcEditor = GlobalVarHover.Editor
-				ui.Window.Invalidate()
-			}
+	// Detect click to open edit popup from any variable click target
+	if GlobalVarClick != nil {
+		var val string
+		if ui.activeEnvVars != nil {
+			val, _ = ui.activeEnvVars[GlobalVarClick.Name]
 		}
+		ui.VarPopupOpen = true
+		ui.VarPopupName = GlobalVarClick.Name
+		ui.VarPopupEnvID = ui.ActiveEnvID
+		ui.VarPopupEditor.SetText(val)
+		ui.VarPopupRange = GlobalVarClick.Range
+		ui.VarPopupSrcEditor = GlobalVarClick.Editor
+		ui.Window.Invalidate()
+		GlobalVarClick = nil
 	}
 
 	// Handle variable edit/select popup
@@ -1514,6 +1509,7 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 					if !ok {
 						break
 					}
+					ui.saveVarPopup()
 					ui.VarPopupOpen = false
 				}
 				event.Op(gtx.Ops, &ui.VarPopupOpen)
@@ -1552,40 +1548,6 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 											return TextField(gtx, ui.Theme, &ui.VarPopupEditor, "Value", true, nil, 0, unit.Sp(12))
 										}),
-										layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											for ui.VarPopupSave.Clicked(gtx) {
-												if ui.VarPopupEnvID != "" {
-													for _, env := range ui.Environments {
-														if env.Data.ID == ui.VarPopupEnvID {
-															updated := false
-															for i, v := range env.Data.Vars {
-																if v.Key == ui.VarPopupName {
-																	env.Data.Vars[i].Value = ui.VarPopupEditor.Text()
-																	updated = true
-																	break
-																}
-															}
-															if !updated {
-																env.Data.Vars = append(env.Data.Vars, EnvVar{
-																	Key: ui.VarPopupName,
-																	Value: ui.VarPopupEditor.Text(),
-																	Enabled: true,
-																})
-															}
-															SaveEnvironment(env.Data)
-															ui.activeEnvDirty = true
-															break
-														}
-													}
-												}
-												ui.VarPopupOpen = false
-											}
-											btn := material.Button(ui.Theme, &ui.VarPopupSave, "Save Value")
-											btn.Background = colorAccent
-											btn.Inset = layout.UniformInset(unit.Dp(8))
-											return btn.Layout(gtx)
-										}),
 										layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 											lbl := material.Label(ui.Theme, unit.Sp(11), "Replace with other variable:")
@@ -1622,6 +1584,7 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 														ui.VarPopupSrcEditor.SetText(newTxt)
 														ui.saveState()
 													}
+													ui.saveVarPopup()
 													ui.VarPopupOpen = false
 												}
 												
@@ -1842,6 +1805,33 @@ func (ui *AppUI) closeTab(idx int) {
 		ui.ActiveIdx = len(ui.Tabs) - 1
 	}
 	ui.saveState()
+}
+
+func (ui *AppUI) saveVarPopup() {
+	if ui.VarPopupEnvID != "" {
+		for _, env := range ui.Environments {
+			if env.Data.ID == ui.VarPopupEnvID {
+				updated := false
+				for i, v := range env.Data.Vars {
+					if v.Key == ui.VarPopupName {
+						env.Data.Vars[i].Value = ui.VarPopupEditor.Text()
+						updated = true
+						break
+					}
+				}
+				if !updated {
+					env.Data.Vars = append(env.Data.Vars, EnvVar{
+						Key:     ui.VarPopupName,
+						Value:   ui.VarPopupEditor.Text(),
+						Enabled: true,
+					})
+				}
+				SaveEnvironment(env.Data)
+				ui.activeEnvDirty = true
+				break
+			}
+		}
+	}
 }
 
 func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {

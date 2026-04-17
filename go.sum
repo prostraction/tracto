@@ -11,8 +11,8 @@ github.com/go-text/typesetting-utils v0.0.0-20250618110550-c820a94c77b8 h1:4KCsc
 github.com/go-text/typesetting-utils v0.0.0-20250618110550-c820a94c77b8/go.mod h1:3/62I4La/HBRX9TcTpBj4eipLiwzf+vhI+7whTc9V7o=
 github.com/godbus/dbus/v5 v5.0.6 h1:mkgN1ofwASrYnJ5W6U/BxG15eXXXjirgZc7CLqkcaro=
 github.com/godbus/dbus/v5 v5.0.6/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5xrFpKfA=
-github.com/nanorele/gio v1.0.7 h1:cqql6+sLDm9eAWCMHHS867QCNO5pOdDWtn3Rh32Sqis=
-github.com/nanorele/gio v1.0.7/go.mod h1:VNkEedn9+I9Lri3qZ/bkE4aZZfgFhwGp8kisWBN8Hho=
+github.com/nanorele/gio v1.0.9 h1:5V1/fT0haTkJHbmYEwUDxhpcGt7qPS76i6ebY1vcHro=
+github.com/nanorele/gio v1.0.9/go.mod h1:VNkEedn9+I9Lri3qZ/bkE4aZZfgFhwGp8kisWBN8Hho=
 github.com/nanorele/gio-x v1.0.5 h1:qM9HWvi3zQOXXsDcjkFHI6EVlp2vRYUJXHwOH+1FwT8=
 github.com/nanorele/gio-x v1.0.5/go.mod h1:fISSC7es/ojyvQCZKHrIp9sF/nPm4A9mJqRt478lQnw=
 golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 h1:R84qjqJb5nVJMxqWYb3np9L5ZsaDtB+a39EqjV0JSUM=
