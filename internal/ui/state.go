@@ -191,17 +191,32 @@ func buildExtItems(nodes []*CollectionNode) []ExtItem {
 	return items
 }
 
-func SaveCollectionToFile(col *ParsedCollection) error {
-	if col == nil || col.Root == nil {
-		return nil
+func snapshotCollection(col *ParsedCollection) (string, *ExtCollection) {
+	if col == nil || col.Root == nil || col.ID == "" {
+		return "", nil
 	}
-	ext := ExtCollection{}
+	ext := &ExtCollection{}
 	ext.Info.Name = col.Name
 	ext.Item = buildExtItems(col.Root.Children)
+	return col.ID, ext
+}
+
+func writeCollectionFile(id string, ext *ExtCollection) error {
+	if id == "" || ext == nil {
+		return nil
+	}
 	data, err := json.MarshalIndent(ext, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(getCollectionsDir(), col.ID+".json")
+	path := filepath.Join(getCollectionsDir(), id+".json")
 	return os.WriteFile(path, data, 0644)
+}
+
+func SaveCollectionToFile(col *ParsedCollection) error {
+	id, ext := snapshotCollection(col)
+	if ext == nil {
+		return nil
+	}
+	return writeCollectionFile(id, ext)
 }

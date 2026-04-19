@@ -10,3 +10,5 @@ vendor
 .claude
 gio-local
 *tmp.*
+*I.md
+*E.md

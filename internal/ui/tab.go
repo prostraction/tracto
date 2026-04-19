@@ -2,15 +2,11 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"image"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,6 +72,12 @@ type tabResponse struct {
 	isJSON        bool
 }
 
+type previewResult struct {
+	body          string
+	previewLoaded int64
+	isJSON        bool
+}
+
 type RequestTab struct {
 	Title            string
 	TabBtn           widget.Clickable
@@ -114,6 +116,8 @@ type RequestTab struct {
 	pendingNodePath  []int
 
 	responseChan    chan tabResponse
+	previewChan     chan previewResult
+	previewLoading  bool
 	requestID       uint64
 	isRequesting    bool
 	cancelFn        context.CancelFunc
@@ -135,6 +139,7 @@ type RequestTab struct {
 	PropertiesBtn  widget.Clickable
 
 	ReqWrapEnabled   bool
+	jsonFmtState     *JSONFormatterState
 	ReqWrapBtn       widget.Clickable
 	ReqListH         widget.List
 	HeaderSplitRatio float32
@@ -163,6 +168,8 @@ type RequestTab struct {
 	pendingRespWidth int
 	pendingReqWidth  int
 	widthChangeTime  time.Time
+	reqWidthTimer    *time.Timer
+	respWidthTimer   *time.Timer
 
 	cleanTitle    string
 	cleanTitleSrc string
@@ -176,11 +183,13 @@ func NewRequestTab(title string) *RequestTab {
 		RespEditor:       widget.Editor{ReadOnly: true},
 		MethodClickables: make([]widget.Clickable, len(methods)),
 		responseChan:     make(chan tabResponse, 1),
+		previewChan:      make(chan previewResult, 1),
 		FileSaveChan:     make(chan io.WriteCloser, 1),
 		appendChan:       make(chan string, 128),
 		SplitRatio:       0.5,
 		WrapEnabled:      true,
 		ReqWrapEnabled:   true,
+		jsonFmtState:     &JSONFormatterState{},
 		HeadersExpanded:  false,
 		HeaderSplitRatio: 0.35,
 	}
@@ -251,9 +260,9 @@ func (t *RequestTab) checkDirty() {
 	t.IsDirty = false
 }
 
-func (t *RequestTab) saveToCollection() {
+func (t *RequestTab) saveToCollection() *ParsedCollection {
 	if t.LinkedNode == nil || t.LinkedNode.Request == nil {
-		return
+		return nil
 	}
 	req := t.LinkedNode.Request
 	req.URL = t.URLInput.Text()
@@ -269,10 +278,8 @@ func (t *RequestTab) saveToCollection() {
 			}
 		}
 	}
-	if t.LinkedNode.Collection != nil {
-		SaveCollectionToFile(t.LinkedNode.Collection)
-	}
 	t.IsDirty = false
+	return t.LinkedNode.Collection
 }
 
 func processTemplate(input string, env map[string]string) string {
@@ -434,7 +441,7 @@ func (t *RequestTab) updateSystemHeaders() {
 	}
 }
 
-func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Window, activeEnv map[string]string, isAppDragging bool, onSave func()) layout.Dimensions {
+func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Window, activeEnv map[string]string, isAppDragging bool, onSave func(), onCollectionDirty func(*ParsedCollection)) layout.Dimensions {
 	t.window = win
 
 	select {
@@ -457,8 +464,8 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 		t.RespEditor.Insert(buf.String())
 		t.invalidateSearchCache()
 		t.RespEditor.SetCaret(caretStart, caretEnd)
-		//t.RespEditor.SetScrollCaret(false)
 		t.RespEditor.SetScrollY(scrollY)
+		t.RespEditor.SetScrollCaret(false)
 	default:
 	}
 
@@ -504,6 +511,16 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 				t.RespEditor.SetText("")
 			}
 		}
+	default:
+	}
+
+	select {
+	case pr := <-t.previewChan:
+		t.previewLoading = false
+		t.previewLoaded = pr.previewLoaded
+		t.respIsJSON = pr.isJSON
+		t.RespEditor.SetText(pr.body)
+		t.invalidateSearchCache()
 	default:
 	}
 
@@ -605,7 +622,9 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 	}
 
 	if t.SaveToColBtn.Clicked(gtx) {
-		t.saveToCollection()
+		if col := t.saveToCollection(); col != nil && onCollectionDirty != nil {
+			onCollectionDirty(col)
+		}
 	}
 
 	if t.dirtyCheckNeeded && t.LinkedNode != nil {
@@ -1030,12 +1049,11 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 											if t.pendingReqWidth != targetW {
 												t.pendingReqWidth = targetW
 												t.widthChangeTime = gtx.Now
+												armInvalidateTimer(&t.reqWidthTimer, win, 320*time.Millisecond)
 											}
 											if gtx.Now.Sub(t.widthChangeTime) > 300*time.Millisecond {
 												t.LastReqWidth = t.pendingReqWidth
 												t.pendingReqWidth = 0
-											} else {
-												win.Invalidate()
 											}
 										}
 										edGtx := gtx
@@ -1263,12 +1281,11 @@ func (t *RequestTab) layoutResponseBody(gtx layout.Context, th *material.Theme, 
 				if t.pendingRespWidth != targetW {
 					t.pendingRespWidth = targetW
 					t.widthChangeTime = gtx.Now
+					armInvalidateTimer(&t.respWidthTimer, win, 320*time.Millisecond)
 				}
 				if gtx.Now.Sub(t.widthChangeTime) > 300*time.Millisecond {
 					t.LastRespWidth = t.pendingRespWidth
 					t.pendingRespWidth = 0
-				} else {
-					win.Invalidate()
 				}
 			}
 			edGtx := gtx
@@ -1370,529 +1387,4 @@ func formatSize(n int64) string {
 	default:
 		return strconv.FormatInt(n, 10) + " B"
 	}
-}
-
-func (t *RequestTab) cancelRequest() {
-	if t.cancelFn != nil {
-		t.cancelFn()
-		t.cancelFn = nil
-	}
-}
-
-func (t *RequestTab) cleanupRespFile() {
-	if t.respFile != "" {
-		os.Remove(t.respFile)
-		t.respFile = ""
-	}
-}
-
-func (t *RequestTab) prepareRequest(env map[string]string) (*http.Request, context.Context, context.CancelFunc, error) {
-	urlRaw := strings.ReplaceAll(t.URLInput.Text(), "\n", "")
-	urlRaw = strings.TrimSpace(utils.SanitizeText(urlRaw))
-	url := processTemplate(urlRaw, env)
-
-	if url == "" {
-		return nil, nil, nil, errors.New("empty URL")
-	}
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		url = "http://" + url
-	}
-
-	reqBody := bodyReplacer.Replace(t.ReqEditor.Text())
-	reqBody = processTemplate(reqBody, env)
-	strippedBody := utils.StripJSONComments(reqBody)
-	if json.Valid([]byte(strippedBody)) {
-		reqBody = strippedBody
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	req, err := http.NewRequestWithContext(ctx, t.Method, url, strings.NewReader(reqBody))
-	if err != nil {
-		cancel()
-		return nil, nil, nil, err
-	}
-
-	t.updateSystemHeaders()
-	for _, h := range t.Headers {
-		k := strings.TrimSpace(processTemplate(h.Key.Text(), env))
-		v := strings.TrimSpace(processTemplate(h.Value.Text(), env))
-		if k != "" {
-			req.Header.Add(k, v)
-		}
-	}
-	return req, ctx, cancel, nil
-}
-
-func (t *RequestTab) drainAppendChan() {
-	for {
-		select {
-		case <-t.appendChan:
-		default:
-			return
-		}
-	}
-}
-
-func (t *RequestTab) streamToEditor(text string, win *app.Window) {
-	t.appendChan <- text
-	win.Invalidate()
-}
-
-func (t *RequestTab) beginRequest() {
-	t.cancelRequest()
-	t.requestID++
-	t.drainAppendChan()
-	select {
-	case <-t.responseChan:
-	default:
-	}
-	t.Status = "Sending..."
-	t.RespEditor.SetText("")
-	t.invalidateSearchCache()
-	t.isRequesting = true
-	t.respSize = 0
-	t.respIsJSON = false
-	t.downloadedBytes.Store(0)
-	t.cleanupRespFile()
-	t.PreviewEnabled = true
-	t.SaveToFilePath = ""
-	t.previewLoaded = 0
-}
-
-func (t *RequestTab) sendResponse(resp tabResponse) {
-	select {
-	case <-t.responseChan:
-	default:
-	}
-	t.responseChan <- resp
-}
-
-const maxStreamPreview = 512 * 1024
-
-func (t *RequestTab) streamResponse(ctx context.Context, body io.Reader, dest io.Writer, win *app.Window, livePreview bool) (int64, error) {
-	bufp := streamBufPool.Get().(*[]byte)
-	buf := *bufp
-	defer streamBufPool.Put(bufp)
-	var total int64
-	var previewSent int64
-	lastUpdate := time.Now()
-	for {
-		n, readErr := body.Read(buf)
-		if n > 0 {
-			if _, wErr := dest.Write(buf[:n]); wErr != nil {
-				return total, wErr
-			}
-			total += int64(n)
-			t.downloadedBytes.Store(total)
-
-			if livePreview && previewSent < maxStreamPreview {
-				sendN := int64(n)
-				if previewSent+sendN > maxStreamPreview {
-					sendN = maxStreamPreview - previewSent
-				}
-				chunk := utils.SanitizeBytes(buf[:sendN])
-				select {
-				case t.appendChan <- chunk:
-				default:
-				}
-				previewSent += sendN
-			}
-
-			if time.Since(lastUpdate) > 250*time.Millisecond {
-				lastUpdate = time.Now()
-				win.Invalidate()
-			}
-		}
-		if readErr != nil {
-			if readErr != io.EOF && ctx.Err() == context.Canceled {
-				return total, ctx.Err()
-			}
-			break
-		}
-	}
-	return total, nil
-}
-
-const previewBatchSize = 15 * 1024 * 1024
-const jsonPreviewBatchSize = 15 * 1024 * 1024
-
-var previewBufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, previewBatchSize)
-		return &b
-	},
-}
-
-func getPreviewBuf(size int64) ([]byte, func()) {
-	if size <= previewBatchSize {
-		bp := previewBufPool.Get().(*[]byte)
-		buf := (*bp)[:size]
-		return buf, func() { previewBufPool.Put(bp) }
-	}
-	buf := make([]byte, size)
-	return buf, func() {}
-}
-
-var indentTable [64]string
-
-func init() {
-	for i := range indentTable {
-		indentTable[i] = "\n" + strings.Repeat("  ", i)
-	}
-}
-
-func indentJSON(data []byte) string {
-	var out strings.Builder
-	out.Grow(len(data) * 3)
-	indent := 0
-	inString := false
-	needIndent := false
-
-	i := 0
-	for i < len(data) {
-		if inString {
-			start := i
-			for i < len(data) && data[i] != '"' && data[i] != '\\' {
-				i++
-			}
-			if i > start {
-				out.Write(data[start:i])
-			}
-			if i >= len(data) {
-				break
-			}
-			b := data[i]
-			i++
-			if b == '\\' {
-				out.WriteByte('\\')
-				if i < len(data) {
-					out.WriteByte(data[i])
-					i++
-				}
-			} else {
-				out.WriteByte('"')
-				inString = false
-			}
-			continue
-		}
-
-		b := data[i]
-		i++
-
-		switch b {
-		case '"':
-			if needIndent {
-				indentWrite(&out, indent)
-				needIndent = false
-			}
-			out.WriteByte('"')
-			inString = true
-		case '{', '[':
-			if needIndent {
-				indentWrite(&out, indent)
-				needIndent = false
-			}
-			out.WriteByte(b)
-			indent++
-			needIndent = true
-		case '}', ']':
-			indent--
-			if indent < 0 {
-				indent = 0
-			}
-			indentWrite(&out, indent)
-			out.WriteByte(b)
-		case ',':
-			out.WriteByte(',')
-			needIndent = true
-		case ':':
-			out.WriteByte(':')
-			out.WriteByte(' ')
-		case ' ', '\t', '\n', '\r':
-		default:
-			if needIndent {
-				indentWrite(&out, indent)
-				needIndent = false
-			}
-			start := i - 1
-			for i < len(data) {
-				c := data[i]
-				if c == ',' || c == '}' || c == ']' || c == ':' || c == ' ' || c == '\t' || c == '\n' || c == '\r' {
-					break
-				}
-				i++
-			}
-			out.Write(data[start:i])
-		}
-	}
-	return out.String()
-}
-
-func indentWrite(out *strings.Builder, indent int) {
-	if indent >= len(indentTable) {
-		indent = len(indentTable) - 1
-	}
-	out.WriteString(indentTable[indent])
-}
-
-func looksLikeJSON(data []byte) bool {
-	for _, b := range data {
-		switch b {
-		case ' ', '\t', '\n', '\r':
-			continue
-		case '{', '[':
-			return true
-		default:
-			return false
-		}
-	}
-	return false
-}
-
-func loadPreviewFromFile(path string, totalSize int64) (string, int64, bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", 0, false
-	}
-	defer f.Close()
-
-	var probe [64]byte
-	pn, _ := f.Read(probe[:])
-	isJSON := looksLikeJSON(probe[:pn])
-
-	batchSize := int64(previewBatchSize)
-	if isJSON {
-		batchSize = int64(jsonPreviewBatchSize)
-	}
-	readSize := totalSize
-	if readSize > batchSize {
-		readSize = batchSize
-	}
-
-	f.Seek(0, io.SeekStart)
-	data, release := getPreviewBuf(readSize)
-	n, _ := io.ReadFull(f, data)
-	data = data[:n]
-
-	var result string
-	if isJSON {
-		result = indentJSON(data)
-	} else {
-		result = utils.SanitizeBytes(data)
-	}
-	release()
-	return result, int64(n), isJSON
-}
-
-func (t *RequestTab) loadMorePreview() {
-	if t.respFile == "" || t.previewLoaded >= t.respSize {
-		return
-	}
-
-	filePath := t.respFile
-	offset := t.previewLoaded
-	batchLimit := int64(previewBatchSize)
-	if t.respIsJSON {
-		batchLimit = int64(jsonPreviewBatchSize)
-	}
-	readSize := t.respSize - t.previewLoaded
-	if readSize > batchLimit {
-		readSize = batchLimit
-	}
-	t.previewLoaded += readSize
-	win := t.window
-	isJSON := t.respIsJSON
-
-	go func() {
-		f, err := os.Open(filePath)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		f.Seek(offset, io.SeekStart)
-
-		data, release := getPreviewBuf(readSize)
-		n, _ := io.ReadFull(f, data)
-		data = data[:n]
-
-		var extra string
-		if isJSON {
-			extra = indentJSON(data)
-		} else {
-			extra = utils.SanitizeBytes(data)
-		}
-		release()
-		t.streamToEditor(extra, win)
-	}()
-}
-
-func openFile(path string) {
-	switch runtime.GOOS {
-	case "windows":
-		exec.Command("cmd", "/c", "start", "", path).Start()
-	case "darwin":
-		exec.Command("open", path).Start()
-	default:
-		exec.Command("xdg-open", path).Start()
-	}
-}
-
-func openFileInExplorer(path string) {
-	switch runtime.GOOS {
-	case "windows":
-		exec.Command("explorer", "/select,", filepath.ToSlash(path)).Start()
-	case "darwin":
-		exec.Command("open", "-R", path).Start()
-	default:
-		dir := filepath.Dir(path)
-		exec.Command("xdg-open", dir).Start()
-	}
-}
-
-func (t *RequestTab) executeRequest(win *app.Window, env map[string]string) {
-	t.beginRequest()
-
-	req, ctx, cancel, err := t.prepareRequest(env)
-	if err != nil {
-		t.Status = "Error: " + err.Error()
-		t.isRequesting = false
-		win.Invalidate()
-		return
-	}
-	t.cancelFn = cancel
-	reqID := t.requestID
-
-	go func() {
-		defer win.Invalidate()
-
-		start := time.Now()
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			status := "Error: " + err.Error()
-			if ctx.Err() == context.Canceled {
-				status = "Cancelled"
-			}
-			t.sendResponse(tabResponse{requestID: reqID, status: status})
-			return
-		}
-		defer resp.Body.Close()
-
-		tmpFile, err := os.CreateTemp("", "tracto-resp-*.tmp")
-		if err != nil {
-			t.sendResponse(tabResponse{requestID: reqID, status: "Error: " + err.Error()})
-			return
-		}
-		tmpPath := tmpFile.Name()
-
-		total, sErr := t.streamResponse(ctx, resp.Body, tmpFile, win, true)
-		tmpFile.Close()
-
-		if sErr != nil {
-			os.Remove(tmpPath)
-			status := "Error: " + sErr.Error()
-			if ctx.Err() == context.Canceled {
-				status = "Cancelled"
-			}
-			t.sendResponse(tabResponse{requestID: reqID, status: status})
-			return
-		}
-
-		duration := time.Since(start)
-		display, loaded, isJSON := loadPreviewFromFile(tmpPath, total)
-		statusText := resp.Status + "  " + duration.Round(time.Millisecond).String() + "  " + formatSize(total)
-
-		t.sendResponse(tabResponse{
-			requestID:     reqID,
-			status:        statusText,
-			body:          display,
-			respSize:      total,
-			respFile:      tmpPath,
-			previewLoaded: loaded,
-			isJSON:        isJSON,
-		})
-	}()
-}
-
-func (t *RequestTab) executeRequestToFile(win *app.Window, env map[string]string, dest io.WriteCloser) {
-	t.beginRequest()
-	t.PreviewEnabled = false
-
-	req, ctx, cancel, err := t.prepareRequest(env)
-	if err != nil {
-		t.Status = "Error: " + err.Error()
-		t.isRequesting = false
-		dest.Close()
-		win.Invalidate()
-		return
-	}
-	t.cancelFn = cancel
-	reqID := t.requestID
-
-	go func() {
-		defer func() {
-			dest.Close()
-			win.Invalidate()
-		}()
-
-		start := time.Now()
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			status := "Error: " + err.Error()
-			if ctx.Err() == context.Canceled {
-				status = "Cancelled"
-			}
-			t.sendResponse(tabResponse{requestID: reqID, status: status})
-			return
-		}
-		defer resp.Body.Close()
-
-		tmpFile, tmpErr := os.CreateTemp("", "tracto-resp-*.tmp")
-		var writer io.Writer = dest
-		if tmpErr == nil {
-			writer = io.MultiWriter(dest, tmpFile)
-		}
-
-		total, sErr := t.streamResponse(ctx, resp.Body, writer, win, false)
-
-		var tmpPath string
-		if tmpFile != nil {
-			tmpFile.Close()
-			if sErr != nil {
-				os.Remove(tmpFile.Name())
-			} else {
-				tmpPath = tmpFile.Name()
-			}
-		}
-
-		if sErr != nil {
-			status := "Error: " + sErr.Error()
-			if ctx.Err() == context.Canceled {
-				status = "Cancelled"
-			}
-			t.sendResponse(tabResponse{requestID: reqID, status: status})
-			return
-		}
-
-		duration := time.Since(start)
-		statusText := resp.Status + "  " + duration.Round(time.Millisecond).String() + "  " + formatSize(total) + "  Saved to file"
-		t.sendResponse(tabResponse{
-			requestID: reqID,
-			status:    statusText,
-			respSize:  total,
-			respFile:  tmpPath,
-		})
-	}()
-}
-
-func (t *RequestTab) loadPreviewForSavedFile() {
-	if t.respFile == "" || t.respSize == 0 {
-		return
-	}
-	t.PreviewEnabled = true
-	display, loaded, isJSON := loadPreviewFromFile(t.respFile, t.respSize)
-	t.previewLoaded = loaded
-	t.respIsJSON = isJSON
-
-	t.RespEditor.SetText(display)
-	t.invalidateSearchCache()
 }

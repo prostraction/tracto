@@ -42,6 +42,32 @@ func measureTextWidth(gtx layout.Context, th *material.Theme, size unit.Sp, fnt 
 	return maxW.Ceil()
 }
 
+type widthCacheKey struct {
+	pxPerEm  int
+	typeface string
+	text     string
+}
+
+const widthCacheLimit = 2048
+
+var widthCache = make(map[widthCacheKey]int, 512)
+
+func measureTextWidthCached(gtx layout.Context, th *material.Theme, size unit.Sp, fnt font.Font, str string) int {
+	if str == "" {
+		return 0
+	}
+	key := widthCacheKey{gtx.Sp(size), string(fnt.Typeface), str}
+	if w, ok := widthCache[key]; ok {
+		return w
+	}
+	w := measureTextWidth(gtx, th, size, fnt, str)
+	if len(widthCache) >= widthCacheLimit {
+		widthCache = make(map[widthCacheKey]int, 512)
+	}
+	widthCache[key] = w
+	return w
+}
+
 var monoFont = font.Font{Typeface: "Ubuntu Mono"}
 
 type cachedMetrics struct {
@@ -199,8 +225,8 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 				}
 				lineStart := lineStarts[lineIdx]
 
-				pWidth := measureTextWidth(gtx, th, textSize, monoFont, textStr[lineStart:start])
-				vWidth := measureTextWidth(gtx, th, textSize, monoFont, textStr[start:end])
+				pWidth := measureTextWidthCached(gtx, th, textSize, monoFont, textStr[lineStart:start])
+				vWidth := measureTextWidthCached(gtx, th, textSize, monoFont, textStr[start:end])
 
 				bgColor := colorVarMissing
 				if _, ok := env[varName]; ok {
@@ -392,8 +418,8 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 				}
 				lineStart := lineStarts[lineIdx]
 
-				pWidth := measureTextWidth(gtx, th, textSize, monoFont, textStr[lineStart:start])
-				vWidth := measureTextWidth(gtx, th, textSize, monoFont, textStr[start:end])
+				pWidth := measureTextWidthCached(gtx, th, textSize, monoFont, textStr[lineStart:start])
+				vWidth := measureTextWidthCached(gtx, th, textSize, monoFont, textStr[start:end])
 
 				bgColor := colorVarMissing
 				if _, ok := env[varName]; ok {

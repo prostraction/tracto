@@ -76,18 +76,34 @@ type CollectionUI struct {
 }
 
 func nodePathFrom(root *CollectionNode, target *CollectionNode) []int {
-	if root == target {
-		return []int{}
+	if root == nil || target == nil || root == target {
+		return nil
 	}
-	for i, child := range root.Children {
-		if child == target {
-			return []int{i}
-		}
-		if sub := nodePathFrom(child, target); sub != nil {
-			return append([]int{i}, sub...)
-		}
+	var depth int
+	for cur := target; cur != nil && cur != root; cur = cur.Parent {
+		depth++
 	}
-	return nil
+	path := make([]int, depth)
+	cur := target
+	for i := depth - 1; i >= 0; i-- {
+		parent := cur.Parent
+		if parent == nil {
+			return nil
+		}
+		found := -1
+		for j, c := range parent.Children {
+			if c == cur {
+				found = j
+				break
+			}
+		}
+		if found < 0 {
+			return nil
+		}
+		path[i] = found
+		cur = parent
+	}
+	return path
 }
 
 func nodeAtPath(root *CollectionNode, path []int) *CollectionNode {
