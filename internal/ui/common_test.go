@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -26,7 +27,16 @@ func (m *mockSource) Execute(cmd input.Command) {}
 func setupTestConfigDir(t *testing.T) string {
 	tempDir := t.TempDir()
 	
-	// Mock os.UserConfigDir
+	// Ensure isolation by overriding the global config path
+	configPath := filepath.Join(tempDir, "tracto-test")
+	configPathOverride = configPath
+	
+	// Reset override after test
+	t.Cleanup(func() {
+		configPathOverride = ""
+	})
+
+	// Also mock environment variables just in case
 	if runtime.GOOS == "windows" {
 		t.Setenv("AppData", tempDir)
 	} else if runtime.GOOS == "darwin" {

@@ -12,8 +12,8 @@ func TestPaths(t *testing.T) {
 	setupTestConfigDir(t)
 	
 	cfgPath := getConfigPath()
-	if !strings.HasSuffix(cfgPath, "tracto") {
-		t.Errorf("expected config path to end with tracto, got %s", cfgPath)
+	if !strings.HasSuffix(cfgPath, "tracto-test") {
+		t.Errorf("expected config path to end with tracto-test, got %s", cfgPath)
 	}
 	
 	stateFile := getStateFile()

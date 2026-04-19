@@ -302,7 +302,7 @@ func TestBuildStateSnapshot(t *testing.T) {
 }
 
 func TestAppUIStateLoad(t *testing.T) {
-	tempDir := setupTestConfigDir(t)
+	setupTestConfigDir(t)
 	
 	// Create a dummy state file
 	state := AppState{
@@ -312,12 +312,12 @@ func TestAppUIStateLoad(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(state)
-	os.MkdirAll(filepath.Join(tempDir, "tracto"), 0755)
-	os.WriteFile(filepath.Join(tempDir, "tracto", "state.json"), data, 0644)
+	os.MkdirAll(filepath.Dir(getStateFile()), 0755)
+	os.WriteFile(getStateFile(), data, 0644)
 	
 	ui := NewAppUI()
 	if len(ui.Tabs) != 1 || ui.Tabs[0].Title != "Saved Tab" {
-		t.Errorf("expected 1 tab loaded from state, got %d", len(ui.Tabs))
+		t.Errorf("expected 1 tab loaded from state, got %d (title=%s)", len(ui.Tabs), ui.Tabs[0].Title)
 	}
 }
 
@@ -342,9 +342,9 @@ func TestAppUI_ExtraPaths(t *testing.T) {
 }
 
 func TestAppUIStateLoad_Corrupted(t *testing.T) {
-	tempDir := setupTestConfigDir(t)
-	os.MkdirAll(filepath.Join(tempDir, "tracto"), 0755)
-	os.WriteFile(filepath.Join(tempDir, "tracto", "state.json"), []byte("invalid json"), 0644)
+	_ = setupTestConfigDir(t)
+	os.MkdirAll(filepath.Dir(getStateFile()), 0755)
+	os.WriteFile(getStateFile(), []byte("invalid json"), 0644)
 	
 	ui := NewAppUI()
 	// Should fallback to default tab
@@ -354,15 +354,15 @@ func TestAppUIStateLoad_Corrupted(t *testing.T) {
 }
 
 func TestAppUIStateLoad_NilWrap(t *testing.T) {
-	tempDir := setupTestConfigDir(t)
+	_ = setupTestConfigDir(t)
 	state := AppState{
 		Tabs: []TabState{
 			{Title: "Nil Wrap", ReqWrapEnabled: nil},
 		},
 	}
 	data, _ := json.Marshal(state)
-	os.MkdirAll(filepath.Join(tempDir, "tracto"), 0755)
-	os.WriteFile(filepath.Join(tempDir, "tracto", "state.json"), data, 0644)
+	os.MkdirAll(filepath.Dir(getStateFile()), 0755)
+	os.WriteFile(getStateFile(), data, 0644)
 	
 	ui := NewAppUI()
 	if !ui.Tabs[0].ReqWrapEnabled {

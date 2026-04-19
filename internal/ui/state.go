@@ -35,7 +35,12 @@ type AppState struct {
 	SidebarEnvHeightPx int        `json:"sidebar_env_height_px"`
 }
 
+var configPathOverride string
+
 func getConfigPath() string {
+	if configPathOverride != "" {
+		return configPathOverride
+	}
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		configDir = "."
