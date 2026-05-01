@@ -17,3 +17,4 @@ coverage*
 .claw
 *.log
 bin
+*.exe
