@@ -5,10 +5,13 @@ import (
 	"image/color"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"tracto/internal/ui/syntax"
 
 	"github.com/nanorele/gio/f32"
 	"github.com/nanorele/gio/font"
@@ -127,7 +130,25 @@ type RequestEditor struct {
 	// as a banner with a "Load from file" affordance until the user
 	// dismisses it or successfully attaches a file.
 	oversizeMsg string
+
+	// Tokens for the whole document. Recomputed on (lang, len(text))
+	// change — the latter is a coarse signal for "the buffer was
+	// mutated" that's cheap to check and avoids per-keystroke retoken
+	// during typing. Past the soft cap below we skip tokenization
+	// entirely and fall back to the single-color renderer, so a 50 MB
+	// paste doesn't spend hundreds of ms tokenizing on every wrap-mode
+	// reflow.
+	tokens     []syntax.Token
+	tokensLang syntax.Lang
+	tokensTxt  int
 }
+
+// requestEditorTokenizeMaxBytes caps how large a buffer the editor will
+// tokenize for syntax coloring. Beyond it, RequestEditorStyle.Layout
+// renders single-color (still respects {{var}} chips). Picked at 1 MB —
+// JSON request bodies that big are rare; people sending them care about
+// throughput more than coloring.
+const requestEditorTokenizeMaxBytes = 1 * 1024 * 1024
 
 type editOp struct {
 	pos       int
@@ -160,6 +181,46 @@ func NewRequestEditor() *RequestEditor {
 	return &RequestEditor{
 		lineStarts: []int{0},
 	}
+}
+
+// spansForChunk slices the document-wide token stream into the byte
+// range [chunkStart, chunkEnd) and rebases offsets to be chunk-local
+// (paintColoredText walks chunk text starting at byte 0). Mirrors
+// ResponseViewer.spansForChunk; kept separate so the two viewer types
+// don't have to share a base struct.
+func (v *RequestEditor) spansForChunk(chunkStart, chunkEnd int, sp syntaxPalette, bracketCycle bool) []coloredSpan {
+	if len(v.tokens) == 0 || chunkStart >= chunkEnd {
+		return nil
+	}
+	first := sort.Search(len(v.tokens), func(i int) bool {
+		return v.tokens[i].End > chunkStart
+	})
+	if first >= len(v.tokens) || v.tokens[first].Start >= chunkEnd {
+		return nil
+	}
+	out := make([]coloredSpan, 0, 16)
+	for i := first; i < len(v.tokens); i++ {
+		t := v.tokens[i]
+		if t.Start >= chunkEnd {
+			break
+		}
+		s, e := t.Start, t.End
+		if s < chunkStart {
+			s = chunkStart
+		}
+		if e > chunkEnd {
+			e = chunkEnd
+		}
+		if s >= e {
+			continue
+		}
+		out = append(out, coloredSpan{
+			Start: s - chunkStart,
+			End:   e - chunkStart,
+			Color: sp.colorForToken(t.Kind, t.Depth, bracketCycle),
+		})
+	}
+	return out
 }
 
 // SetText replaces the editor's content and resets scroll/highlight.
@@ -880,6 +941,16 @@ type RequestEditorStyle struct {
 	// them — same colour scheme as TextField in widgets.go. Pass nil
 	// to disable highlighting (cheap; the scan is skipped entirely).
 	Env map[string]string
+
+	// Lang drives syntax coloring. LangPlain (zero) disables it
+	// entirely — same single-Color path as before. Buffers larger than
+	// requestEditorTokenizeMaxBytes also fall back to plain regardless.
+	Lang syntax.Lang
+
+	// Syntax is the per-token-kind palette + bracket cycle. Used only
+	// when Lang != LangPlain.
+	Syntax       syntaxPalette
+	BracketCycle bool
 }
 
 func (s RequestEditorStyle) Layout(gtx layout.Context) layout.Dimensions {
@@ -888,6 +959,23 @@ func (s RequestEditorStyle) Layout(gtx layout.Context) layout.Dimensions {
 	size := gtx.Constraints.Max
 	if size.X <= 0 || size.Y <= 0 {
 		return layout.Dimensions{Size: size}
+	}
+
+	// Refresh the document-wide token stream when language switches
+	// or when the buffer's length changes (a cheap heuristic for
+	// "user touched the body"). Skip tokenization for huge buffers
+	// to keep typing latency bounded.
+	tokenizing := s.Lang != syntax.LangPlain && len(v.text) <= requestEditorTokenizeMaxBytes
+	if tokenizing {
+		if s.Lang != v.tokensLang || len(v.text) != v.tokensTxt {
+			v.tokens = syntax.Tokenize(s.Lang, v.text)
+			v.tokensLang = s.Lang
+			v.tokensTxt = len(v.text)
+		}
+	} else if v.tokens != nil {
+		v.tokens = nil
+		v.tokensLang = syntax.LangPlain
+		v.tokensTxt = 0
 	}
 
 	pad := 0
@@ -1540,7 +1628,13 @@ func (s RequestEditorStyle) Layout(gtx layout.Context) layout.Dimensions {
 		}
 		labelGtx.Constraints.Max.Y = 1 << 24
 		lineText := string(v.text[start:end])
-		dims := lbl.Layout(labelGtx, s.Shaper, s.Font, s.TextSize, lineText, textColor)
+		var dims layout.Dimensions
+		if tokenizing && len(v.tokens) > 0 {
+			spans := v.spansForChunk(start, end, s.Syntax, s.BracketCycle)
+			dims = paintColoredText(labelGtx, s.Shaper, s.Font, s.TextSize, lineText, spans, s.Color, s.Wrap, innerW)
+		} else {
+			dims = lbl.Layout(labelGtx, s.Shaper, s.Font, s.TextSize, lineText, textColor)
+		}
 		tr.Pop()
 
 		// Track widest measured chunk for horizontal scroll bounds.

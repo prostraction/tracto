@@ -1028,7 +1028,85 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 		ui.layoutVarPopup(gtx)
 	}
 
+	// Settings color picker — rendered as a deferred overlay on top of
+	// everything so it floats over the rest of the settings panel
+	// (matches the method dropdown's behaviour). The picker's own
+	// gestures handle drag input within the deferred area.
+	if ui.SettingsOpen && ui.SettingsState != nil && ui.SettingsState.ColorPicker.isOpen() {
+		ui.layoutColorPickerOverlay(gtx)
+	}
+
 	return dim
+}
+
+// layoutColorPickerOverlay renders the inline HSV picker as a deferred
+// overlay anchored near where the user clicked the swatch. Uses
+// op.Defer so the picker draws on top of all preceding ops in the
+// current frame. A full-window backdrop registered inside the same
+// macro detects Press events outside the picker rect and dismisses it
+// — same click-outside-to-close pattern the var popup uses.
+func (ui *AppUI) layoutColorPickerOverlay(gtx layout.Context) {
+	p := &ui.SettingsState.ColorPicker
+	pickerW := gtx.Dp(unit.Dp(240))
+	pickerH := gtx.Dp(unit.Dp(216))
+	gap := gtx.Dp(unit.Dp(6))
+
+	// Anchor below the cursor, flipped above if there's no room. Then
+	// clamp to keep the popup fully on-screen.
+	px := int(p.anchor.X) + gap
+	py := int(p.anchor.Y) + gap
+	if px+pickerW > gtx.Constraints.Max.X {
+		px = gtx.Constraints.Max.X - pickerW - gap
+	}
+	if py+pickerH > gtx.Constraints.Max.Y {
+		py = int(p.anchor.Y) - pickerH - gap
+	}
+	if px < 0 {
+		px = 0
+	}
+	if py < 0 {
+		py = 0
+	}
+	pickerRect := image.Rect(px, py, px+pickerW, py+pickerH)
+
+	macro := op.Record(gtx.Ops)
+
+	// Backdrop covers the whole window. event.Op registers a tag whose
+	// pointer.Filter catches every Press; presses inside pickerRect are
+	// the user driving the picker (drag SV, hue, click Close), so we
+	// ignore them — anything else means "click outside" and closes the
+	// picker. Backdrop is drawn before the picker so the picker still
+	// renders on top within the same op.Defer.
+	backdropStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
+	for {
+		ev, ok := gtx.Event(pointer.Filter{
+			Target: &p.backdrop,
+			Kinds:  pointer.Press,
+		})
+		if !ok {
+			break
+		}
+		pe, ok := ev.(pointer.Event)
+		if !ok {
+			continue
+		}
+		pos := image.Pt(int(pe.Position.X), int(pe.Position.Y))
+		if pos.In(pickerRect) {
+			continue
+		}
+		p.closePicker()
+	}
+	event.Op(gtx.Ops, &p.backdrop)
+	backdropStack.Pop()
+
+	// Picker on top of the backdrop.
+	pickerOff := op.Offset(image.Pt(px, py)).Push(gtx.Ops)
+	pickerGtx := gtx
+	pickerGtx.Constraints.Min = image.Pt(pickerW, pickerH)
+	pickerGtx.Constraints.Max = pickerGtx.Constraints.Min
+	renderColorPicker(pickerGtx, ui.Theme, p)
+	pickerOff.Pop()
+	op.Defer(gtx.Ops, macro.Stop())
 }
 
 func (ui *AppUI) layoutVarPopup(gtx layout.Context) {

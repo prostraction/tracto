@@ -38,13 +38,84 @@ type AppSettings struct {
 	Proxy             string          `json:"proxy"`
 	DefaultHeaders    []DefaultHeader `json:"default_headers"`
 
-	JSONIndentSpaces    int     `json:"json_indent_spaces"`
-	WrapLinesDefault    bool    `json:"wrap_lines_default"`
-	PreviewMaxMB        int     `json:"preview_max_mb"`
-	ResponseBodyPadding int     `json:"response_body_padding"`
-	DefaultSplitRatio   float32 `json:"default_split_ratio"`
-	AutoFormatJSON      bool    `json:"auto_format_json"`
-	StripJSONComments   bool    `json:"strip_json_comments"`
+	JSONIndentSpaces        int     `json:"json_indent_spaces"`
+	WrapLinesDefault        bool    `json:"wrap_lines_default"`
+	PreviewMaxMB            int     `json:"preview_max_mb"`
+	ResponseBodyPadding     int     `json:"response_body_padding"`
+	DefaultSplitRatio       float32 `json:"default_split_ratio"`
+	AutoFormatJSON          bool    `json:"auto_format_json"`
+	StripJSONComments       bool    `json:"strip_json_comments"`
+	BracketPairColorization bool    `json:"bracket_pair_colorization"`
+
+	// SyntaxOverrides keyed by theme ID. Empty hex strings within an
+	// override mean "use the theme default for this token kind"; only
+	// non-empty entries actually replace a built-in color, so users can
+	// tweak just the few colors that bother them without committing to
+	// a full re-skin of the theme.
+	SyntaxOverrides map[string]ThemeSyntaxOverride `json:"syntax_overrides,omitempty"`
+
+	// ThemeOverrides keyed by theme ID. Same semantics as
+	// SyntaxOverrides but for the surrounding chrome palette
+	// (backgrounds, borders, accent, danger, etc.). Applied before
+	// SyntaxOverrides so the user can keep theme-derived defaults for
+	// the syntax block while re-skinning the chrome, or vice versa.
+	ThemeOverrides map[string]ThemeColorOverride `json:"theme_overrides,omitempty"`
+}
+
+// ThemeColorOverride mirrors palette's chrome fields as optional hex
+// strings. Empty fields fall through to the theme default.
+type ThemeColorOverride struct {
+	Bg           string `json:"bg,omitempty"`
+	BgDark       string `json:"bg_dark,omitempty"`
+	BgField      string `json:"bg_field,omitempty"`
+	BgMenu       string `json:"bg_menu,omitempty"`
+	BgPopup      string `json:"bg_popup,omitempty"`
+	BgHover      string `json:"bg_hover,omitempty"`
+	BgSecondary  string `json:"bg_secondary,omitempty"`
+	BgLoadMore   string `json:"bg_load_more,omitempty"`
+	BgDragHolder string `json:"bg_drag_holder,omitempty"`
+	BgDragGhost  string `json:"bg_drag_ghost,omitempty"`
+	Border       string `json:"border,omitempty"`
+	BorderLight  string `json:"border_light,omitempty"`
+	Fg           string `json:"fg,omitempty"`
+	FgMuted      string `json:"fg_muted,omitempty"`
+	FgDim        string `json:"fg_dim,omitempty"`
+	FgHint       string `json:"fg_hint,omitempty"`
+	FgDisabled   string `json:"fg_disabled,omitempty"`
+	White        string `json:"white,omitempty"`
+	Accent       string `json:"accent,omitempty"`
+	AccentHover  string `json:"accent_hover,omitempty"`
+	AccentDim    string `json:"accent_dim,omitempty"`
+	AccentFg     string `json:"accent_fg,omitempty"`
+	Danger       string `json:"danger,omitempty"`
+	DangerFg     string `json:"danger_fg,omitempty"`
+	Cancel       string `json:"cancel,omitempty"`
+	CloseHover   string `json:"close_hover,omitempty"`
+	ScrollThumb  string `json:"scroll_thumb,omitempty"`
+	VarFound     string `json:"var_found,omitempty"`
+	VarMissing   string `json:"var_missing,omitempty"`
+	DividerLight string `json:"divider_light,omitempty"`
+}
+
+// ThemeSyntaxOverride lets the user override individual token colors
+// for a single theme. All fields are optional ("" = use theme default);
+// only the strings that successfully parse via parseHexColor are
+// applied at runtime.
+type ThemeSyntaxOverride struct {
+	Plain       string `json:"plain,omitempty"`
+	String      string `json:"string,omitempty"`
+	Number      string `json:"number,omitempty"`
+	Bool        string `json:"bool,omitempty"`
+	Null        string `json:"null,omitempty"`
+	Key         string `json:"key,omitempty"`
+	Punctuation string `json:"punctuation,omitempty"`
+	Operator    string `json:"operator,omitempty"`
+	Keyword     string `json:"keyword,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Comment     string `json:"comment,omitempty"`
+	Bracket0    string `json:"bracket0,omitempty"`
+	Bracket1    string `json:"bracket1,omitempty"`
+	Bracket2    string `json:"bracket2,omitempty"`
 }
 
 func defaultSettings() AppSettings {
@@ -68,13 +139,14 @@ func defaultSettings() AppSettings {
 		Proxy:             "",
 		DefaultHeaders:    nil,
 
-		JSONIndentSpaces:    2,
-		WrapLinesDefault:    false,
-		PreviewMaxMB:        15,
-		ResponseBodyPadding: 4,
-		DefaultSplitRatio:   0.5,
-		AutoFormatJSON:      true,
-		StripJSONComments:   true,
+		JSONIndentSpaces:        2,
+		WrapLinesDefault:        false,
+		PreviewMaxMB:            15,
+		ResponseBodyPadding:     4,
+		DefaultSplitRatio:       0.5,
+		AutoFormatJSON:          true,
+		StripJSONComments:       true,
+		BracketPairColorization: true,
 	}
 }
 
@@ -109,6 +181,7 @@ type palette struct {
 	VarFound     color.NRGBA
 	VarMissing   color.NRGBA
 	DividerLight color.NRGBA
+	Syntax       syntaxPalette
 }
 
 func shadeColor(c color.NRGBA, amt float32) color.NRGBA {
@@ -183,7 +256,7 @@ func makeTheme(bg, fg, accent, danger color.NRGBA, isLight bool) palette {
 	if isLight {
 		white = color.NRGBA{R: 20, G: 20, B: 20, A: 255}
 	}
-	return palette{
+	p := palette{
 		Bg:           bg,
 		BgDark:       shadeColor(bg, bgDirDark),
 		BgField:      shadeColor(bg, fieldDir),
@@ -215,6 +288,8 @@ func makeTheme(bg, fg, accent, danger color.NRGBA, isLight bool) palette {
 		VarMissing:   withAlpha(danger, 100),
 		DividerLight: withAlpha(fg, 60),
 	}
+	p.Syntax = deriveSyntax(p)
+	return p
 }
 
 type themeDef struct {
@@ -254,6 +329,7 @@ var darkPalette = palette{
 	VarFound:     color.NRGBA{R: 40, G: 110, B: 160, A: 100},
 	VarMissing:   color.NRGBA{R: 130, G: 60, B: 60, A: 100},
 	DividerLight: color.NRGBA{R: 255, G: 255, B: 255, A: 60},
+	Syntax:       darkPlusSyntax,
 }
 
 var lightPalette = palette{
@@ -287,109 +363,110 @@ var lightPalette = palette{
 	VarFound:     color.NRGBA{R: 40, G: 110, B: 160, A: 80},
 	VarMissing:   color.NRGBA{R: 130, G: 60, B: 60, A: 80},
 	DividerLight: color.NRGBA{R: 0, G: 0, B: 0, A: 40},
+	Syntax:       lightPlusSyntax,
 }
 
 var themeRegistry = []themeDef{
 	{ID: "dark", Name: "Dark+ (default dark)", Palette: darkPalette},
 	{ID: "light", Name: "Light+ (default light)", Palette: lightPalette},
-	{ID: "monokai", Name: "Monokai", Palette: makeTheme(
+	{ID: "monokai", Name: "Monokai", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 39, G: 40, B: 34, A: 255},
 		color.NRGBA{R: 248, G: 248, B: 242, A: 255},
 		color.NRGBA{R: 166, G: 226, B: 46, A: 255},
 		color.NRGBA{R: 249, G: 38, B: 114, A: 255},
 		false,
-	)},
-	{ID: "monokai-dimmed", Name: "Monokai Dimmed", Palette: makeTheme(
+	), monokaiSyntax)},
+	{ID: "monokai-dimmed", Name: "Monokai Dimmed", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 30, G: 30, B: 30, A: 255},
 		color.NRGBA{R: 193, G: 193, B: 193, A: 255},
 		color.NRGBA{R: 155, G: 184, B: 75, A: 255},
 		color.NRGBA{R: 204, G: 102, B: 102, A: 255},
 		false,
-	)},
-	{ID: "solarized-dark", Name: "Solarized Dark", Palette: makeTheme(
+	), monokaiDimmedSyntax)},
+	{ID: "solarized-dark", Name: "Solarized Dark", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 0, G: 43, B: 54, A: 255},
 		color.NRGBA{R: 147, G: 161, B: 161, A: 255},
 		color.NRGBA{R: 38, G: 139, B: 210, A: 255},
 		color.NRGBA{R: 220, G: 50, B: 47, A: 255},
 		false,
-	)},
-	{ID: "solarized-light", Name: "Solarized Light", Palette: makeTheme(
+	), solarizedDarkSyntax)},
+	{ID: "solarized-light", Name: "Solarized Light", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 253, G: 246, B: 227, A: 255},
 		color.NRGBA{R: 88, G: 110, B: 117, A: 255},
 		color.NRGBA{R: 38, G: 139, B: 210, A: 255},
 		color.NRGBA{R: 220, G: 50, B: 47, A: 255},
 		true,
-	)},
-	{ID: "dracula", Name: "Dracula", Palette: makeTheme(
+	), solarizedLightSyntax)},
+	{ID: "dracula", Name: "Dracula", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 40, G: 42, B: 54, A: 255},
 		color.NRGBA{R: 248, G: 248, B: 242, A: 255},
 		color.NRGBA{R: 189, G: 147, B: 249, A: 255},
 		color.NRGBA{R: 255, G: 85, B: 85, A: 255},
 		false,
-	)},
-	{ID: "abyss", Name: "Abyss", Palette: makeTheme(
+	), draculaSyntax)},
+	{ID: "abyss", Name: "Abyss", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 0, G: 12, B: 24, A: 255},
 		color.NRGBA{R: 108, G: 149, B: 235, A: 255},
 		color.NRGBA{R: 0, G: 139, B: 139, A: 255},
 		color.NRGBA{R: 210, G: 50, B: 50, A: 255},
 		false,
-	)},
-	{ID: "kimbie-dark", Name: "Kimbie Dark", Palette: makeTheme(
+	), abyssSyntax)},
+	{ID: "kimbie-dark", Name: "Kimbie Dark", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 34, G: 26, B: 15, A: 255},
 		color.NRGBA{R: 211, G: 175, B: 134, A: 255},
 		color.NRGBA{R: 136, G: 155, B: 74, A: 255},
 		color.NRGBA{R: 220, G: 62, B: 42, A: 255},
 		false,
-	)},
-	{ID: "tomorrow-night-blue", Name: "Tomorrow Night Blue", Palette: makeTheme(
+	), kimbieDarkSyntax)},
+	{ID: "tomorrow-night-blue", Name: "Tomorrow Night Blue", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 0, G: 36, B: 81, A: 255},
 		color.NRGBA{R: 255, G: 255, B: 255, A: 255},
 		color.NRGBA{R: 114, G: 133, B: 183, A: 255},
 		color.NRGBA{R: 255, G: 157, B: 132, A: 255},
 		false,
-	)},
-	{ID: "red", Name: "Red", Palette: makeTheme(
+	), tomorrowNightBlueSyntax)},
+	{ID: "red", Name: "Red", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 57, G: 10, B: 9, A: 255},
 		color.NRGBA{R: 243, G: 224, B: 224, A: 255},
 		color.NRGBA{R: 255, G: 104, B: 66, A: 255},
 		color.NRGBA{R: 215, G: 40, B: 40, A: 255},
 		false,
-	)},
-	{ID: "quiet-light", Name: "Quiet Light", Palette: makeTheme(
+	), redSyntax)},
+	{ID: "quiet-light", Name: "Quiet Light", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 245, G: 245, B: 245, A: 255},
 		color.NRGBA{R: 51, G: 51, B: 51, A: 255},
 		color.NRGBA{R: 154, G: 103, B: 0, A: 255},
 		color.NRGBA{R: 210, G: 40, B: 50, A: 255},
 		true,
-	)},
-	{ID: "one-dark", Name: "One Dark Pro", Palette: makeTheme(
+	), quietLightSyntax)},
+	{ID: "one-dark", Name: "One Dark Pro", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 40, G: 44, B: 52, A: 255},
 		color.NRGBA{R: 171, G: 178, B: 191, A: 255},
 		color.NRGBA{R: 97, G: 175, B: 239, A: 255},
 		color.NRGBA{R: 224, G: 108, B: 117, A: 255},
 		false,
-	)},
-	{ID: "github-dark", Name: "GitHub Dark", Palette: makeTheme(
+	), oneDarkSyntax)},
+	{ID: "github-dark", Name: "GitHub Dark", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 13, G: 17, B: 23, A: 255},
 		color.NRGBA{R: 201, G: 209, B: 217, A: 255},
 		color.NRGBA{R: 88, G: 166, B: 255, A: 255},
 		color.NRGBA{R: 248, G: 81, B: 73, A: 255},
 		false,
-	)},
-	{ID: "github-light", Name: "GitHub Light", Palette: makeTheme(
+	), githubDarkSyntax)},
+	{ID: "github-light", Name: "GitHub Light", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 255, G: 255, B: 255, A: 255},
 		color.NRGBA{R: 36, G: 41, B: 47, A: 255},
 		color.NRGBA{R: 9, G: 105, B: 218, A: 255},
 		color.NRGBA{R: 207, G: 34, B: 46, A: 255},
 		true,
-	)},
-	{ID: "nord", Name: "Nord", Palette: makeTheme(
+	), githubLightSyntax)},
+	{ID: "nord", Name: "Nord", Palette: withSyntax(makeTheme(
 		color.NRGBA{R: 46, G: 52, B: 64, A: 255},
 		color.NRGBA{R: 216, G: 222, B: 233, A: 255},
 		color.NRGBA{R: 136, G: 192, B: 208, A: 255},
 		color.NRGBA{R: 191, G: 97, B: 106, A: 255},
 		false,
-	)},
+	), nordSyntax)},
 }
 
 func paletteFor(id string) palette {
@@ -447,6 +524,14 @@ func applyPalette(p palette) {
 	colorVarFound = p.VarFound
 	colorVarMissing = p.VarMissing
 	colorDividerLight = p.DividerLight
+	colorSyntax = p.Syntax
+	if (colorSyntax.Plain == color.NRGBA{}) {
+		// Theme didn't ship a Syntax block (or only the default zero
+		// value made it through marshaling) — derive a coherent set
+		// from Bg/Fg/Accent so the response viewer always has colors
+		// to draw with.
+		colorSyntax = deriveSyntax(p)
+	}
 	applyMethodPalette(methodPaletteFor(p.Bg))
 }
 
@@ -540,19 +625,27 @@ func (s AppSettings) sanitized() AppSettings {
 var bodyTextSize = unit.Sp(13)
 
 var (
-	currentUserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-	currentDefaultHeaders    []DefaultHeader
-	currentJSONIndent        = 2
-	currentPreviewMaxMB      = 15
-	currentRespBodyPad       = unit.Dp(4)
-	currentDefaultMethod     = "GET"
-	currentDefaultSplitRatio = float32(0.5)
-	currentAutoFormatJSON    = true
-	currentStripJSONComments = true
+	currentUserAgent           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	currentDefaultHeaders      []DefaultHeader
+	currentJSONIndent          = 2
+	currentPreviewMaxMB        = 15
+	currentRespBodyPad         = unit.Dp(4)
+	currentDefaultMethod       = "GET"
+	currentDefaultSplitRatio   = float32(0.5)
+	currentAutoFormatJSON      = true
+	currentStripJSONComments   = true
+	currentBracketColorization = true
 )
 
 func applyAppSettings(th *material.Theme, s AppSettings) {
-	applyPalette(paletteFor(s.Theme))
+	p := paletteFor(s.Theme)
+	if ov, ok := s.ThemeOverrides[s.Theme]; ok {
+		p = applyThemeOverride(p, ov)
+	}
+	if ov, ok := s.SyntaxOverrides[s.Theme]; ok {
+		p.Syntax = applySyntaxOverride(p.Syntax, ov)
+	}
+	applyPalette(p)
 	bodyTextSize = unit.Sp(float32(s.BodyTextSize))
 	currentUserAgent = s.UserAgent
 	if currentUserAgent == "" {
@@ -578,6 +671,7 @@ func applyAppSettings(th *material.Theme, s AppSettings) {
 	}
 	currentAutoFormatJSON = s.AutoFormatJSON
 	currentStripJSONComments = s.StripJSONComments
+	currentBracketColorization = s.BracketPairColorization
 	httpClient = buildHTTPClient(s)
 	if th != nil {
 		th.Palette.Bg = colorBg

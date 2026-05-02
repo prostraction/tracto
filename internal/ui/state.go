@@ -114,6 +114,9 @@ func loadStateWithRaw() (AppState, []byte) {
 		if !bytes.Contains(data, []byte(`"default_split_ratio"`)) {
 			state.Settings.DefaultSplitRatio = 0.5
 		}
+		if !bytes.Contains(data, []byte(`"bracket_pair_colorization"`)) {
+			state.Settings.BracketPairColorization = true
+		}
 	}
 	return state, data
 }

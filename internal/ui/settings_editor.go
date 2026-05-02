@@ -61,19 +61,67 @@ type SettingsEditorState struct {
 	JSONIndentInc     widget.Clickable
 	PreviewMaxDec     widget.Clickable
 	PreviewMaxInc     widget.Clickable
-	WrapLines         widget.Bool
-	AutoFormatJSON    widget.Bool
-	StripJSONComments widget.Bool
+	WrapLines               widget.Bool
+	AutoFormatJSON          widget.Bool
+	StripJSONComments       widget.Bool
+	BracketPairColorization widget.Bool
+
+	// Per-theme syntax color overrides. Editors are indexed by
+	// tokenColorTable; SyntaxResetBtns are matched 1:1. The cached
+	// theme ID lets us detect when the user picked a different theme
+	// and re-populate the editors from that theme's defaults instead
+	// of carrying the previous theme's hex strings into the new view.
+	SyntaxOverrideEditors []widget.Editor
+	SyntaxResetBtns       []widget.Clickable
+	SyntaxSwatchBtns      []widget.Clickable
+	SyntaxResetAllBtn     widget.Clickable
+	syntaxEditorsThemeID  string
+
+	// Per-theme chrome color overrides. Mirrors the syntax slice trio;
+	// the same picker handles both via colorPickerState.kind.
+	ThemeColorEditors    []widget.Editor
+	ThemeColorResetBtns  []widget.Clickable
+	ThemeColorSwatchBtns []widget.Clickable
+	ThemeColorResetAllBtn widget.Clickable
+	themeEditorsThemeID  string
+
+	// Collapsible blocks — both default to closed since the lists are
+	// long (29 chrome rows + 14 syntax rows) and rarely needed.
+	ThemeColorsExpanded   bool
+	SyntaxColorsExpanded  bool
+	ThemeColorsHeaderBtn  widget.Clickable
+	SyntaxColorsHeaderBtn widget.Clickable
+
+	// ColorPicker is the HSV picker overlay. kind == pickerNone means
+	// closed; one picker at a time, so a single state struct is enough
+	// — gestures and HSV reset on each open().
+	ColorPicker colorPickerState
 
 	initialized bool
 }
 
 func newSettingsEditorState(current AppSettings) *SettingsEditorState {
 	s := &SettingsEditorState{
-		Draft:            current,
-		CategoryBtn:      make([]widget.Clickable, len(settingsCategories)),
-		ThemeBtns:        make([]widget.Clickable, len(themeRegistry)),
-		DefaultMethodBtn: make([]widget.Clickable, len(methods)),
+		Draft:                 current,
+		CategoryBtn:           make([]widget.Clickable, len(settingsCategories)),
+		ThemeBtns:             make([]widget.Clickable, len(themeRegistry)),
+		DefaultMethodBtn:      make([]widget.Clickable, len(methods)),
+		SyntaxOverrideEditors: make([]widget.Editor, len(tokenColorTable)),
+		SyntaxResetBtns:       make([]widget.Clickable, len(tokenColorTable)),
+		SyntaxSwatchBtns:      make([]widget.Clickable, len(tokenColorTable)),
+		ThemeColorEditors:     make([]widget.Editor, len(paletteColorTable)),
+		ThemeColorResetBtns:   make([]widget.Clickable, len(paletteColorTable)),
+		ThemeColorSwatchBtns:  make([]widget.Clickable, len(paletteColorTable)),
+	}
+	s.ColorPicker.kind = pickerNone
+	s.ColorPicker.openIdx = -1
+	for i := range s.SyntaxOverrideEditors {
+		s.SyntaxOverrideEditors[i].SingleLine = true
+		s.SyntaxOverrideEditors[i].Submit = true
+	}
+	for i := range s.ThemeColorEditors {
+		s.ThemeColorEditors[i].SingleLine = true
+		s.ThemeColorEditors[i].Submit = true
 	}
 	s.ContentList.Axis = layout.Vertical
 
@@ -96,6 +144,7 @@ func newSettingsEditorState(current AppSettings) *SettingsEditorState {
 	s.WrapLines.Value = current.WrapLinesDefault
 	s.AutoFormatJSON.Value = current.AutoFormatJSON
 	s.StripJSONComments.Value = current.StripJSONComments
+	s.BracketPairColorization.Value = current.BracketPairColorization
 
 	s.initialized = true
 	return s
@@ -160,6 +209,7 @@ func (ui *AppUI) applyDraftSettings() {
 	st.Draft.WrapLinesDefault = st.WrapLines.Value
 	st.Draft.AutoFormatJSON = st.AutoFormatJSON.Value
 	st.Draft.StripJSONComments = st.StripJSONComments.Value
+	st.Draft.BracketPairColorization = st.BracketPairColorization.Value
 
 	st.Draft = st.Draft.sanitized()
 	ui.Settings = st.Draft
@@ -172,6 +222,80 @@ func (ui *AppUI) closeSettings() {
 	if ui.Window != nil {
 		ui.Window.Invalidate()
 	}
+}
+
+// syncSyntaxEditors repopulates the override editors when the active
+// draft theme changes. We don't pre-fill with theme defaults — the
+// editor stays empty when no override is set, and a placeholder hint
+// shows the current effective hex below it. This way the editor's
+// content is exactly what the user has chosen to override; clearing it
+// drops back to the theme default without ambiguity.
+func (st *SettingsEditorState) syncSyntaxEditors() {
+	if st.syntaxEditorsThemeID == st.Draft.Theme {
+		return
+	}
+	st.syntaxEditorsThemeID = st.Draft.Theme
+	ov := st.Draft.SyntaxOverrides[st.Draft.Theme]
+	for i, entry := range tokenColorTable {
+		st.SyntaxOverrideEditors[i].SetText(entry.getOv(ov))
+	}
+}
+
+// putOverride writes h into the active theme's override slot at i,
+// creating the SyntaxOverrides map / theme entry on demand and
+// removing them when the resulting override is fully empty (so we
+// don't persist empty objects to state.json).
+func (st *SettingsEditorState) putOverride(i int, h string) {
+	themeID := st.Draft.Theme
+	ov := st.Draft.SyntaxOverrides[themeID]
+	tokenColorTable[i].setOv(&ov, h)
+	if ov == (ThemeSyntaxOverride{}) {
+		if st.Draft.SyntaxOverrides != nil {
+			delete(st.Draft.SyntaxOverrides, themeID)
+			if len(st.Draft.SyntaxOverrides) == 0 {
+				st.Draft.SyntaxOverrides = nil
+			}
+		}
+		return
+	}
+	if st.Draft.SyntaxOverrides == nil {
+		st.Draft.SyntaxOverrides = map[string]ThemeSyntaxOverride{}
+	}
+	st.Draft.SyntaxOverrides[themeID] = ov
+}
+
+// syncThemeEditors mirrors syncSyntaxEditors but for the chrome
+// override block. Triggered after a theme switch so the row UI shows
+// the new theme's overrides instead of the old theme's hex values.
+func (st *SettingsEditorState) syncThemeEditors() {
+	if st.themeEditorsThemeID == st.Draft.Theme {
+		return
+	}
+	st.themeEditorsThemeID = st.Draft.Theme
+	ov := st.Draft.ThemeOverrides[st.Draft.Theme]
+	for i, entry := range paletteColorTable {
+		st.ThemeColorEditors[i].SetText(entry.getOv(ov))
+	}
+}
+
+// putThemeOverride is the chrome-color counterpart to putOverride.
+func (st *SettingsEditorState) putThemeOverride(i int, h string) {
+	themeID := st.Draft.Theme
+	ov := st.Draft.ThemeOverrides[themeID]
+	paletteColorTable[i].setOv(&ov, h)
+	if ov == (ThemeColorOverride{}) {
+		if st.Draft.ThemeOverrides != nil {
+			delete(st.Draft.ThemeOverrides, themeID)
+			if len(st.Draft.ThemeOverrides) == 0 {
+				st.Draft.ThemeOverrides = nil
+			}
+		}
+		return
+	}
+	if st.Draft.ThemeOverrides == nil {
+		st.Draft.ThemeOverrides = map[string]ThemeColorOverride{}
+	}
+	st.Draft.ThemeOverrides[themeID] = ov
 }
 
 func (ui *AppUI) resetSettings() {
@@ -194,6 +318,7 @@ func (ui *AppUI) resetSettings() {
 	st.WrapLines.Value = def.WrapLinesDefault
 	st.AutoFormatJSON.Value = def.AutoFormatJSON
 	st.StripJSONComments.Value = def.StripJSONComments
+	st.BracketPairColorization.Value = def.BracketPairColorization
 }
 
 func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
@@ -224,10 +349,21 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 			tid := themeRegistry[i].ID
 			if st.Draft.Theme != tid {
 				st.Draft.Theme = tid
+				// Close the picker — its HSV would otherwise reflect
+				// the *previous* theme's color and the next drag
+				// would write that color as an override on the new
+				// theme.
+				st.ColorPicker.closePicker()
 				changed = true
 			}
 		}
 	}
+	// Refresh override editor text right after the theme switch so the
+	// row UI reflects the new theme's overrides — running this *before*
+	// the editor-update loop also prevents an editor's stale Dark+ hex
+	// from being interpreted as the new theme's first edit (SetText
+	// doesn't fire ChangeEvent, so it's a one-way refresh).
+	st.syncSyntaxEditors()
 
 	for st.UISizeDec.Clicked(gtx) {
 		if st.Draft.UITextSize > 10 {
@@ -395,6 +531,158 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 			}
 		}
 	}
+
+	// Syntax override editors: each text change writes into the draft's
+	// SyntaxOverrides[currentTheme]; invalid hex is stored as-is but
+	// applySyntaxOverride filters at apply time, so an in-progress
+	// "#1F2" stays parked until the user finishes typing.
+	for i := range st.SyntaxOverrideEditors {
+		ed := &st.SyntaxOverrideEditors[i]
+		for {
+			ev, ok := ed.Update(gtx)
+			if !ok {
+				break
+			}
+			if _, ok := ev.(widget.ChangeEvent); ok {
+				st.putOverride(i, strings.TrimSpace(ed.Text()))
+				changed = true
+			}
+			if _, ok := ev.(widget.SubmitEvent); ok {
+				changed = true
+			}
+		}
+	}
+	for i := range st.SyntaxResetBtns {
+		for st.SyntaxResetBtns[i].Clicked(gtx) {
+			st.putOverride(i, "")
+			st.SyntaxOverrideEditors[i].SetText("")
+			if st.ColorPicker.kind == pickerSyntax && st.ColorPicker.openIdx == i {
+				st.ColorPicker.closePicker()
+			}
+			changed = true
+		}
+	}
+	// Swatch click — toggles the picker overlay for this row. anchor
+	// is the pointer position at click time (window coords); the
+	// app-level overlay reads this to render the picker as a deferred
+	// popup near the cursor, just like the method dropdown.
+	for i := range st.SyntaxSwatchBtns {
+		for st.SyntaxSwatchBtns[i].Clicked(gtx) {
+			if st.ColorPicker.kind == pickerSyntax && st.ColorPicker.openIdx == i {
+				st.ColorPicker.closePicker()
+			} else {
+				base := paletteFor(st.Draft.Theme).Syntax
+				if ov, ok := st.Draft.SyntaxOverrides[st.Draft.Theme]; ok {
+					base = applySyntaxOverride(base, ov)
+				}
+				st.ColorPicker.open(pickerSyntax, i, tokenColorTable[i].getBase(base), f32Point{X: GlobalPointerPos.X, Y: GlobalPointerPos.Y})
+			}
+			changed = true
+		}
+	}
+	// While the picker is open, push HSV → editor + override every
+	// frame the values changed since last frame. lastHSV is seeded by
+	// open() to the just-set HSV so the first frame doesn't snapshot a
+	// "change" and convert "merely opened" into an explicit override.
+	if st.ColorPicker.isOpen() {
+		cur := [3]float32{st.ColorPicker.h, st.ColorPicker.s, st.ColorPicker.v}
+		if cur != st.ColorPicker.lastHSV {
+			hex := hexFromColor(st.ColorPicker.currentColor())
+			idx := st.ColorPicker.openIdx
+			switch st.ColorPicker.kind {
+			case pickerSyntax:
+				st.SyntaxOverrideEditors[idx].SetText(hex)
+				st.putOverride(idx, hex)
+			case pickerTheme:
+				if idx >= 0 && idx < len(st.ThemeColorEditors) {
+					st.ThemeColorEditors[idx].SetText(hex)
+					st.putThemeOverride(idx, hex)
+				}
+			}
+			changed = true
+		}
+		st.ColorPicker.lastHSV = cur
+	}
+	for st.ColorPicker.close.Clicked(gtx) {
+		st.ColorPicker.closePicker()
+		changed = true
+	}
+	// Theme color editors / reset buttons / swatch clicks. Same flow
+	// as the syntax block, parameterised on tokenColorTable vs
+	// paletteColorTable.
+	st.syncThemeEditors()
+	for i := range st.ThemeColorEditors {
+		ed := &st.ThemeColorEditors[i]
+		for {
+			ev, ok := ed.Update(gtx)
+			if !ok {
+				break
+			}
+			if _, ok := ev.(widget.ChangeEvent); ok {
+				st.putThemeOverride(i, strings.TrimSpace(ed.Text()))
+				changed = true
+			}
+			if _, ok := ev.(widget.SubmitEvent); ok {
+				changed = true
+			}
+		}
+	}
+	for i := range st.ThemeColorResetBtns {
+		for st.ThemeColorResetBtns[i].Clicked(gtx) {
+			st.putThemeOverride(i, "")
+			st.ThemeColorEditors[i].SetText("")
+			if st.ColorPicker.kind == pickerTheme && st.ColorPicker.openIdx == i {
+				st.ColorPicker.closePicker()
+			}
+			changed = true
+		}
+	}
+	for i := range st.ThemeColorSwatchBtns {
+		for st.ThemeColorSwatchBtns[i].Clicked(gtx) {
+			if st.ColorPicker.kind == pickerTheme && st.ColorPicker.openIdx == i {
+				st.ColorPicker.closePicker()
+			} else {
+				base := paletteFor(st.Draft.Theme)
+				if ov, ok := st.Draft.ThemeOverrides[st.Draft.Theme]; ok {
+					base = applyThemeOverride(base, ov)
+				}
+				st.ColorPicker.open(pickerTheme, i, paletteColorTable[i].getBase(base), f32Point{X: GlobalPointerPos.X, Y: GlobalPointerPos.Y})
+			}
+			changed = true
+		}
+	}
+	for st.ThemeColorResetAllBtn.Clicked(gtx) {
+		if st.Draft.ThemeOverrides != nil {
+			delete(st.Draft.ThemeOverrides, st.Draft.Theme)
+			if len(st.Draft.ThemeOverrides) == 0 {
+				st.Draft.ThemeOverrides = nil
+			}
+		}
+		for i := range st.ThemeColorEditors {
+			st.ThemeColorEditors[i].SetText("")
+		}
+		changed = true
+	}
+	// Spoiler toggles.
+	for st.ThemeColorsHeaderBtn.Clicked(gtx) {
+		st.ThemeColorsExpanded = !st.ThemeColorsExpanded
+	}
+	for st.SyntaxColorsHeaderBtn.Clicked(gtx) {
+		st.SyntaxColorsExpanded = !st.SyntaxColorsExpanded
+	}
+
+	for st.SyntaxResetAllBtn.Clicked(gtx) {
+		if st.Draft.SyntaxOverrides != nil {
+			delete(st.Draft.SyntaxOverrides, st.Draft.Theme)
+			if len(st.Draft.SyntaxOverrides) == 0 {
+				st.Draft.SyntaxOverrides = nil
+			}
+		}
+		for i := range st.SyntaxOverrideEditors {
+			st.SyntaxOverrideEditors[i].SetText("")
+		}
+		changed = true
+	}
 	if st.HideTabBar.Update(gtx) {
 		changed = true
 	}
@@ -420,6 +708,9 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 		changed = true
 	}
 	if st.StripJSONComments.Update(gtx) {
+		changed = true
+	}
+	if st.BracketPairColorization.Update(gtx) {
 		changed = true
 	}
 
@@ -484,13 +775,17 @@ func connsStep(current int) int {
 }
 
 func methodGrid(th *material.Theme, st *SettingsEditorState, gtx layout.Context) layout.Dimensions {
-	gap := gtx.Dp(unit.Dp(6))
-	var children []layout.FlexChild
+	// Each method tile is Flexed(1) so the seven buttons evenly partition
+	// the row's full width — a click in any horizontal pixel lands on the
+	// nearest method, no dead gap between tiles.
+	height := gtx.Dp(unit.Dp(28))
+	gap := gtx.Dp(unit.Dp(2))
+	children := make([]layout.FlexChild, 0, len(methods)*2)
 	for i, m := range methods {
 		i, m := i, m
-		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return material.Clickable(gtx, &st.DefaultMethodBtn[i], func(gtx layout.Context) layout.Dimensions {
-				size := image.Pt(gtx.Dp(unit.Dp(72)), gtx.Dp(unit.Dp(28)))
+				size := image.Pt(gtx.Constraints.Max.X, height)
 				gtx.Constraints.Min = size
 				gtx.Constraints.Max = size
 				borderC := colorBorder
@@ -635,7 +930,14 @@ func (ui *AppUI) sectionsAppearance() []layout.Widget {
 	}
 	tabHint := "Hide the row of request tabs above the editor. " + defaultShownHidden(def.HideTabBar)
 	sideHint := "Hide the collections/environments sidebar. " + defaultShownHidden(def.HideSidebar)
-	return []layout.Widget{
+	activeThemeName := defName
+	for _, t := range themeRegistry {
+		if t.ID == st.Draft.Theme {
+			activeThemeName = t.Name
+			break
+		}
+	}
+	widgets := []layout.Widget{
 		settingsSectionTitle(ui.Theme, "Visibility"),
 		spacerH(8),
 		func(gtx layout.Context) layout.Dimensions {
@@ -655,6 +957,220 @@ func (ui *AppUI) sectionsAppearance() []layout.Widget {
 		func(gtx layout.Context) layout.Dimensions {
 			return themeGrid(ui.Theme, st, gtx)
 		},
+		spacerH(20),
+		spoilerHeader(ui.Theme, &st.ThemeColorsHeaderBtn, &st.ThemeColorResetAllBtn,
+			"Customize theme colors — "+activeThemeName, st.ThemeColorsExpanded),
+	}
+	if st.ThemeColorsExpanded {
+		widgets = append(widgets,
+			spacerH(4),
+			settingsHint(ui.Theme, "Type a hex color (e.g. #1F1F1F) or click the swatch for a picker. Empty = theme default."),
+			spacerH(8),
+		)
+		for i := range paletteColorTable {
+			idx := i
+			widgets = append(widgets, themeColorRow(ui.Theme, st, idx))
+			if idx < len(paletteColorTable)-1 {
+				widgets = append(widgets, spacerH(4))
+			}
+		}
+	}
+	widgets = append(widgets,
+		spacerH(20),
+		spoilerHeader(ui.Theme, &st.SyntaxColorsHeaderBtn, &st.SyntaxResetAllBtn,
+			"Customize syntax colors — "+activeThemeName, st.SyntaxColorsExpanded),
+	)
+	if st.SyntaxColorsExpanded {
+		widgets = append(widgets,
+			spacerH(4),
+			settingsHint(ui.Theme, "Type a hex color (e.g. #FF8800) or click the swatch for a picker. Empty = theme default."),
+			spacerH(8),
+		)
+		for i := range tokenColorTable {
+			idx := i
+			widgets = append(widgets, syntaxColorRow(ui.Theme, st, idx))
+			if idx < len(tokenColorTable)-1 {
+				widgets = append(widgets, spacerH(4))
+			}
+		}
+	}
+	return widgets
+}
+
+// spoilerHeader renders a collapsible section title: the title is a
+// Clickable that toggles expanded state (▶ / ▼ chevron), and the
+// "Reset all" button hangs off the right edge so it doesn't toggle the
+// section open/close when clicked.
+func spoilerHeader(th *material.Theme, headerBtn, resetBtn *widget.Clickable, title string, expanded bool) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				return material.Clickable(gtx, headerBtn, func(gtx layout.Context) layout.Dimensions {
+					gtx.Constraints.Min.X = gtx.Constraints.Max.X
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							chev := "▶"
+							if expanded {
+								chev = "▼"
+							}
+							lbl := material.Label(th, unit.Sp(10), chev)
+							lbl.Color = colorFgMuted
+							return lbl.Layout(gtx)
+						}),
+						layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Label(th, unit.Sp(13), title)
+							lbl.Font.Weight = font.Bold
+							return lbl.Layout(gtx)
+						}),
+					)
+				})
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return material.Clickable(gtx, resetBtn, func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Label(th, unit.Sp(11), "Reset all")
+						lbl.Color = colorFgMuted
+						if resetBtn.Hovered() {
+							lbl.Color = colorAccent
+						}
+						return lbl.Layout(gtx)
+					})
+				})
+			}),
+		)
+	}
+}
+
+// themeColorRow is the chrome counterpart to syntaxColorRow. Same
+// shape (swatch + label + hex editor + reset ×); it just hits the
+// paletteColorTable + ThemeOverrides instead of the syntax slice.
+func themeColorRow(th *material.Theme, st *SettingsEditorState, idx int) layout.Widget {
+	entry := paletteColorTable[idx]
+	return func(gtx layout.Context) layout.Dimensions {
+		base := paletteFor(st.Draft.Theme)
+		if ov, ok := st.Draft.ThemeOverrides[st.Draft.Theme]; ok {
+			base = applyThemeOverride(base, ov)
+		}
+		swatchColor := entry.getBase(base)
+		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				size := image.Pt(gtx.Dp(unit.Dp(20)), gtx.Dp(unit.Dp(20)))
+				gtx.Constraints.Min = size
+				gtx.Constraints.Max = size
+				return material.Clickable(gtx, &st.ThemeColorSwatchBtns[idx], func(gtx layout.Context) layout.Dimensions {
+					border := gtx.Dp(unit.Dp(1))
+					if st.ColorPicker.kind == pickerTheme && st.ColorPicker.openIdx == idx {
+						border = gtx.Dp(unit.Dp(2))
+						paint.FillShape(gtx.Ops, colorAccent, clip.UniformRRect(image.Rectangle{Max: size}, 3).Op(gtx.Ops))
+					} else {
+						borderC := colorBorderLight
+						if st.ThemeColorSwatchBtns[idx].Hovered() {
+							borderC = colorAccent
+						}
+						paint.FillShape(gtx.Ops, borderC, clip.UniformRRect(image.Rectangle{Max: size}, 3).Op(gtx.Ops))
+					}
+					inner := image.Rect(border, border, size.X-border, size.Y-border)
+					paint.FillShape(gtx.Ops, swatchColor, clip.UniformRRect(inner, 2).Op(gtx.Ops))
+					return layout.Dimensions{Size: size}
+				})
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(th, unit.Sp(12), entry.label)
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				gtx.Constraints.Max.X = gtx.Dp(unit.Dp(110))
+				gtx.Constraints.Min.X = gtx.Constraints.Max.X
+				return TextField(gtx, th, &st.ThemeColorEditors[idx], hexFromColor(entry.getBase(paletteFor(st.Draft.Theme))), true, nil, 0, unit.Sp(11))
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				size := image.Pt(gtx.Dp(unit.Dp(22)), gtx.Dp(unit.Dp(22)))
+				gtx.Constraints.Min = size
+				gtx.Constraints.Max = size
+				return material.Clickable(gtx, &st.ThemeColorResetBtns[idx], func(gtx layout.Context) layout.Dimensions {
+					bg := colorBgField
+					if st.ThemeColorResetBtns[idx].Hovered() {
+						bg = colorBgHover
+					}
+					paint.FillShape(gtx.Ops, bg, clip.UniformRRect(image.Rectangle{Max: size}, 3).Op(gtx.Ops))
+					return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Label(th, unit.Sp(11), "×")
+						lbl.Color = colorFgMuted
+						return lbl.Layout(gtx)
+					})
+				})
+			}),
+		)
+	}
+}
+
+// syntaxColorRow renders one token color editor: a swatch showing the
+// effective color, the token's label, the hex editor, and a × button
+// that clears the override for this token alone.
+func syntaxColorRow(th *material.Theme, st *SettingsEditorState, idx int) layout.Widget {
+	entry := tokenColorTable[idx]
+	return func(gtx layout.Context) layout.Dimensions {
+		// Effective color: theme default with override applied (if any).
+		basePalette := paletteFor(st.Draft.Theme).Syntax
+		if ov, ok := st.Draft.SyntaxOverrides[st.Draft.Theme]; ok {
+			basePalette = applySyntaxOverride(basePalette, ov)
+		}
+		swatchColor := entry.getBase(basePalette)
+
+		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				size := image.Pt(gtx.Dp(unit.Dp(20)), gtx.Dp(unit.Dp(20)))
+				gtx.Constraints.Min = size
+				gtx.Constraints.Max = size
+				return material.Clickable(gtx, &st.SyntaxSwatchBtns[idx], func(gtx layout.Context) layout.Dimensions {
+					border := gtx.Dp(unit.Dp(1))
+					if st.ColorPicker.kind == pickerSyntax && st.ColorPicker.openIdx == idx {
+						border = gtx.Dp(unit.Dp(2))
+						paint.FillShape(gtx.Ops, colorAccent, clip.UniformRRect(image.Rectangle{Max: size}, 3).Op(gtx.Ops))
+					} else {
+						borderC := colorBorderLight
+						if st.SyntaxSwatchBtns[idx].Hovered() {
+							borderC = colorAccent
+						}
+						paint.FillShape(gtx.Ops, borderC, clip.UniformRRect(image.Rectangle{Max: size}, 3).Op(gtx.Ops))
+					}
+					inner := image.Rect(border, border, size.X-border, size.Y-border)
+					paint.FillShape(gtx.Ops, swatchColor, clip.UniformRRect(inner, 2).Op(gtx.Ops))
+					return layout.Dimensions{Size: size}
+				})
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(th, unit.Sp(12), entry.label)
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				gtx.Constraints.Max.X = gtx.Dp(unit.Dp(110))
+				gtx.Constraints.Min.X = gtx.Constraints.Max.X
+				return TextField(gtx, th, &st.SyntaxOverrideEditors[idx], hexFromColor(entry.getBase(paletteFor(st.Draft.Theme).Syntax)), true, nil, 0, unit.Sp(11))
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				size := image.Pt(gtx.Dp(unit.Dp(22)), gtx.Dp(unit.Dp(22)))
+				gtx.Constraints.Min = size
+				gtx.Constraints.Max = size
+				return material.Clickable(gtx, &st.SyntaxResetBtns[idx], func(gtx layout.Context) layout.Dimensions {
+					bg := colorBgField
+					if st.SyntaxResetBtns[idx].Hovered() {
+						bg = colorBgHover
+					}
+					paint.FillShape(gtx.Ops, bg, clip.UniformRRect(image.Rectangle{Max: size}, 3).Op(gtx.Ops))
+					return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Label(th, unit.Sp(11), "×")
+						lbl.Color = colorFgMuted
+						return lbl.Layout(gtx)
+					})
+				})
+			}),
+		)
 	}
 }
 
@@ -800,6 +1316,7 @@ func (ui *AppUI) sectionsAdvanced() []layout.Widget {
 	wrapHint := "Wrap long lines by default in new editors. " + defaultOnOff(def.WrapLinesDefault)
 	autoFmtHint := "Pretty-print JSON responses in the preview viewer. Disable to display raw bytes as received. " + defaultOnOff(def.AutoFormatJSON)
 	stripHint := "Remove // line comments from JSON request bodies before sending if the result is valid JSON. " + defaultOnOff(def.StripJSONComments)
+	bracketHint := "Color matched brackets in nested JSON by depth, like VS Code. " + defaultOnOff(def.BracketPairColorization)
 	indentLabel := fmt.Sprintf("%d spaces", st.Draft.JSONIndentSpaces)
 	if st.Draft.JSONIndentSpaces == 0 {
 		indentLabel = "minified"
@@ -837,6 +1354,14 @@ func (ui *AppUI) sectionsAdvanced() []layout.Widget {
 		func(gtx layout.Context) layout.Dimensions {
 			sw := styledSwitch(ui.Theme, &st.StripJSONComments)
 			return settingsSwitchRow(ui.Theme, "Strip // comments before send", stripHint, sw.Layout)(gtx)
+		},
+		spacerH(20),
+
+		settingsSectionTitle(ui.Theme, "Syntax coloring"),
+		spacerH(8),
+		func(gtx layout.Context) layout.Dimensions {
+			sw := styledSwitch(ui.Theme, &st.BracketPairColorization)
+			return settingsSwitchRow(ui.Theme, "Bracket pair colorization", bracketHint, sw.Layout)(gtx)
 		},
 	}
 }

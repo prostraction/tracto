@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"tracto/internal/ui/syntax"
 	"tracto/internal/utils"
 
 	"github.com/nanorele/gio/app"
@@ -230,6 +231,50 @@ func NewRequestTab(title string) *RequestTab {
 	t.SearchEditor.SingleLine = true
 	t.SearchEditor.Submit = true
 	return t
+}
+
+// responseLang picks the language used to colorize the response body.
+// It honours the explicit JSON detection that loadPreviewFromFile has
+// already done (probes the first 64 bytes), and otherwise sniffs the
+// Content-Type header from the visible response status text isn't
+// available — Detect's body-sniff fallback covers XML/HTML/JSON.
+func (t *RequestTab) responseLang() syntax.Lang {
+	if !currentAutoFormatJSON {
+		// User explicitly turned off pretty-printing; treat the body as
+		// raw bytes everywhere, no coloring either.
+		return syntax.LangPlain
+	}
+	if t.respIsJSON {
+		return syntax.LangJSON
+	}
+	// Best-effort sniff using whatever's currently in the editor — for
+	// streaming previews this gives consistent coloring before the
+	// header-driven flag (respIsJSON) is set.
+	head := t.RespEditor.text
+	if len(head) > 256 {
+		head = head[:256]
+	}
+	return syntax.Detect("", head)
+}
+
+// requestLang picks the language used to colorize the request body.
+// Looks at the user's Content-Type header first (so manual overrides
+// always win), then falls back to sniffing the body's first bytes.
+func (t *RequestTab) requestLang() syntax.Lang {
+	for _, h := range t.Headers {
+		if strings.EqualFold(h.Key.Text(), "Content-Type") {
+			if l := syntax.Detect(h.Value.Text(), nil); l != syntax.LangPlain {
+				return l
+			}
+			break
+		}
+	}
+	body := t.ReqEditor.text
+	head := body
+	if len(head) > 256 {
+		head = head[:256]
+	}
+	return syntax.Detect("", head)
 }
 
 func (t *RequestTab) getCleanTitle() string {
@@ -784,16 +829,32 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 												return layout.Dimensions{Size: gtx.Constraints.Min}
 											}),
 											layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+												// Each row is exactly rowW wide — wide enough that a
+												// click anywhere within it hits the method (covers
+												// "OPTIONS" with comfortable padding) but not so wide
+												// that the dropdown stretches across the whole window.
+												// Both Min and Max are pinned to rowW so the inner
+												// hover rect and the label container resolve to the
+												// same fixed width regardless of the menu's parent
+												// constraints.
+												rowW := gtx.Dp(unit.Dp(96))
 												children := make([]layout.FlexChild, 0, len(methods))
 												for i, m := range methods {
 													idx := i
 													methodName := m
 													children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-														btn := monoButton(th, &t.MethodClickables[idx], methodName)
-														btn.Background = colorTransparent
-														btn.Color = getMethodColor(methodName)
-														btn.Inset = layout.UniformInset(unit.Dp(8))
-														return btn.Layout(gtx)
+														gtx.Constraints.Min.X = rowW
+														gtx.Constraints.Max.X = rowW
+														return material.Clickable(gtx, &t.MethodClickables[idx], func(gtx layout.Context) layout.Dimensions {
+															if t.MethodClickables[idx].Hovered() {
+																paint.FillShape(gtx.Ops, colorBgHover, clip.Rect{Max: image.Pt(rowW, gtx.Dp(unit.Dp(34)))}.Op())
+															}
+															return layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+																lbl := monoLabel(th, unit.Sp(12), methodName)
+																lbl.Color = getMethodColor(methodName)
+																return lbl.Layout(gtx)
+															})
+														})
 													}))
 												}
 												return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
@@ -1085,6 +1146,9 @@ func (t *RequestTab) layout(gtx layout.Context, th *material.Theme, win *app.Win
 													Wrap:           t.ReqWrapEnabled,
 													Padding:        currentRespBodyPad,
 													Env:            activeEnv,
+													Lang:           t.requestLang(),
+													Syntax:         colorSyntax,
+													BracketCycle:   currentBracketColorization,
 												}
 												return style.Layout(gtx)
 											}),
@@ -1297,6 +1361,7 @@ func (t *RequestTab) layoutResponseBody(gtx layout.Context, th *material.Theme, 
 
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			lang := t.responseLang()
 			vs := ResponseViewerStyle{
 				Viewer:         t.RespEditor,
 				Shaper:         th.Shaper,
@@ -1307,6 +1372,9 @@ func (t *RequestTab) layoutResponseBody(gtx layout.Context, th *material.Theme, 
 				SelectionColor: colorSelection,
 				Wrap:           t.WrapEnabled,
 				Padding:        currentRespBodyPad,
+				Lang:           lang,
+				Syntax:         colorSyntax,
+				BracketCycle:   currentBracketColorization,
 			}
 			return vs.Layout(gtx)
 		}),

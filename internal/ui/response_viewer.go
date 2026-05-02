@@ -4,9 +4,12 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"tracto/internal/ui/syntax"
 
 	"github.com/nanorele/gio/font"
 	"github.com/nanorele/gio/gesture"
@@ -122,12 +125,62 @@ type ResponseViewer struct {
 	lastLineHeight int
 	lastTotalH     int
 	lastViewportH  int
+
+	// Tokens for the whole document, computed once per (text, lang) pair
+	// and looked up by chunk via the per-line index. The cache lives on
+	// the viewer because lang only switches when a new response arrives
+	// — across renders within a response the same token slice is reused.
+	tokens     []syntax.Token
+	tokensLang syntax.Lang
+	tokensTxt  int // len(text) at the time tokens were last (re)built
 }
 
 func NewResponseViewer() *ResponseViewer {
 	return &ResponseViewer{
 		lineStarts: []int{0},
 	}
+}
+
+// spansForChunk slices the document-wide token stream into the byte
+// range [chunkStart, chunkEnd) and translates each token to a
+// coloredSpan (color resolved from the active palette + bracket
+// cycling). Token offsets are rebased to be chunk-local since
+// paintColoredText walks the chunk text starting at byte 0.
+func (v *ResponseViewer) spansForChunk(chunkStart, chunkEnd int, sp syntaxPalette, bracketCycle bool) []coloredSpan {
+	if len(v.tokens) == 0 || chunkStart >= chunkEnd {
+		return nil
+	}
+	// Binary-search the first token that touches the chunk. Tokens are
+	// emitted in order so this is stable.
+	first := sort.Search(len(v.tokens), func(i int) bool {
+		return v.tokens[i].End > chunkStart
+	})
+	if first >= len(v.tokens) || v.tokens[first].Start >= chunkEnd {
+		return nil
+	}
+	out := make([]coloredSpan, 0, 16)
+	for i := first; i < len(v.tokens); i++ {
+		t := v.tokens[i]
+		if t.Start >= chunkEnd {
+			break
+		}
+		s, e := t.Start, t.End
+		if s < chunkStart {
+			s = chunkStart
+		}
+		if e > chunkEnd {
+			e = chunkEnd
+		}
+		if s >= e {
+			continue
+		}
+		out = append(out, coloredSpan{
+			Start: s - chunkStart,
+			End:   e - chunkStart,
+			Color: sp.colorForToken(t.Kind, t.Depth, bracketCycle),
+		})
+	}
+	return out
 }
 
 // SetText replaces the viewer's content and resets scroll and highlight.
@@ -383,6 +436,17 @@ type ResponseViewerStyle struct {
 	// cover the full clipped region. Same value applies to wrap and
 	// non-wrap modes so users see consistent breathing room.
 	Padding unit.Dp
+
+	// Lang drives syntax coloring. LangPlain (the zero value) skips
+	// tokenization entirely and renders in a single Color, matching the
+	// pre-syntax-highlighting behaviour exactly.
+	Lang syntax.Lang
+
+	// Syntax is the per-token-kind palette used when Lang != LangPlain.
+	// Brackets[depth%3] paints TokBracket when BracketCycle is true;
+	// otherwise brackets fall through to Punctuation.
+	Syntax        syntaxPalette
+	BracketCycle  bool
 }
 
 func (s ResponseViewerStyle) Layout(gtx layout.Context) layout.Dimensions {
@@ -391,6 +455,22 @@ func (s ResponseViewerStyle) Layout(gtx layout.Context) layout.Dimensions {
 	size := gtx.Constraints.Max
 	if size.X <= 0 || size.Y <= 0 {
 		return layout.Dimensions{Size: size}
+	}
+
+	// Refresh tokens when language switches OR the document was replaced
+	// (SetText/Append both shift len(v.text); we only re-tokenize on a
+	// length change, accepting that mid-text mutations would need a
+	// stronger signal — but ResponseViewer is append-only in practice).
+	if s.Lang != syntax.LangPlain {
+		if s.Lang != v.tokensLang || len(v.text) != v.tokensTxt {
+			v.tokens = syntax.Tokenize(s.Lang, v.text)
+			v.tokensLang = s.Lang
+			v.tokensTxt = len(v.text)
+		}
+	} else if v.tokens != nil {
+		v.tokens = nil
+		v.tokensLang = syntax.LangPlain
+		v.tokensTxt = 0
 	}
 
 	pad := 0
@@ -823,7 +903,13 @@ func (s ResponseViewerStyle) Layout(gtx layout.Context) layout.Dimensions {
 		}
 		labelGtx.Constraints.Max.Y = 1 << 24
 		lineText := string(v.text[start:end])
-		dims := lbl.Layout(labelGtx, s.Shaper, s.Font, s.TextSize, lineText, textColor)
+		var dims layout.Dimensions
+		if s.Lang != syntax.LangPlain && len(v.tokens) > 0 {
+			spans := v.spansForChunk(start, end, s.Syntax, s.BracketCycle)
+			dims = paintColoredText(labelGtx, s.Shaper, s.Font, s.TextSize, lineText, spans, s.Color, s.Wrap, innerW)
+		} else {
+			dims = lbl.Layout(labelGtx, s.Shaper, s.Font, s.TextSize, lineText, textColor)
+		}
 		tr.Pop()
 
 		// Track widest measured chunk for horizontal scroll bounds.
