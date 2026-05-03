@@ -6,16 +6,6 @@ import (
 	"tracto/internal/ui/syntax"
 )
 
-// syntaxPalette holds per-token-kind colors used by the response viewer
-// when it renders highlighted text. The renderer indexes this struct by
-// syntax.TokenKind; gaps in the token stream and any kind without an
-// explicit color fall back to Plain.
-//
-// Brackets is a 3-color cycle for VS Code-style bracket pair
-// colorization — the renderer picks Brackets[depth % 3] for every
-// TokBracket. Even when bracket-pair colorization is off (toggle in
-// Advanced settings), brackets get Punctuation; the toggle merely
-// switches between the cycle and the flat color.
 type syntaxPalette struct {
 	Plain       color.NRGBA
 	String      color.NRGBA
@@ -31,8 +21,6 @@ type syntaxPalette struct {
 	Brackets    [3]color.NRGBA
 }
 
-// colorForToken resolves a token kind + depth to a paint color, taking
-// the bracket-pair-colorization toggle into account.
 func (sp syntaxPalette) colorForToken(kind syntax.TokenKind, depth uint8, bracketCycle bool) color.NRGBA {
 	switch kind {
 	case syntax.TokString:
@@ -64,16 +52,9 @@ func (sp syntaxPalette) colorForToken(kind syntax.TokenKind, depth uint8, bracke
 	return sp.Plain
 }
 
-// deriveSyntax produces a sensible syntaxPalette algorithmically from a
-// theme's Bg/Fg/Accent/Danger so that themes without an explicit
-// override (and any future themes added via makeTheme) get coherent
-// coloring without hand-tuning every member. The math is the same for
-// light and dark — the inputs already encode the contrast direction.
 func deriveSyntax(p palette) syntaxPalette {
 	isLight := relLuminance(p.Bg) > 0.5
 
-	// For light themes, shift hues toward darker variants so they read
-	// against the white background; for dark, brighter.
 	shift := func(c color.NRGBA, dark, light float32) color.NRGBA {
 		if isLight {
 			return shadeColor(c, light)
@@ -81,7 +62,6 @@ func deriveSyntax(p palette) syntaxPalette {
 		return shadeColor(c, dark)
 	}
 
-	// String: green-ish — derive by warming danger toward yellow-green.
 	stringC := mixColor(p.Accent, color.NRGBA{R: 152, G: 195, B: 121, A: 255}, 0.65)
 	if isLight {
 		stringC = mixColor(stringC, color.NRGBA{R: 0, G: 100, B: 0, A: 255}, 0.4)
@@ -102,39 +82,32 @@ func deriveSyntax(p palette) syntaxPalette {
 	}
 	if isLight {
 		syn.Brackets = [3]color.NRGBA{
-			{R: 0, G: 122, B: 204, A: 255},  // blue
-			{R: 200, G: 100, B: 0, A: 255},  // orange
-			{R: 130, G: 90, B: 200, A: 255}, // violet
+			{R: 0, G: 122, B: 204, A: 255},
+			{R: 200, G: 100, B: 0, A: 255},
+			{R: 130, G: 90, B: 200, A: 255},
 		}
 	} else {
 		syn.Brackets = [3]color.NRGBA{
-			{R: 255, G: 215, B: 0, A: 255},   // gold (#FFD700)
-			{R: 218, G: 112, B: 214, A: 255}, // orchid (#DA70D6)
-			{R: 23, G: 159, B: 255, A: 255},  // sky blue (#179FFF)
+			{R: 255, G: 215, B: 0, A: 255},
+			{R: 218, G: 112, B: 214, A: 255},
+			{R: 23, G: 159, B: 255, A: 255},
 		}
 	}
 	return syn
 }
 
-// withSyntax returns a copy of p with Syntax/Brackets overwritten.
-// Used by theme definitions that ship explicit VS Code-parity colors
-// instead of relying on the algorithmic derivation.
 func withSyntax(p palette, s syntaxPalette) palette {
 	p.Syntax = s
 	return p
 }
 
-// --- explicit per-theme tables, transcribed from the corresponding VS
-// Code theme JSONs. Only the eight most popular themes are tuned by
-// hand; the rest fall through to deriveSyntax. ---
-
 var darkPlusSyntax = syntaxPalette{
 	Plain:       color.NRGBA{R: 212, G: 212, B: 212, A: 255},
-	String:      color.NRGBA{R: 206, G: 145, B: 120, A: 255}, // strings
-	Number:      color.NRGBA{R: 181, G: 206, B: 168, A: 255}, // numerics
-	Bool:        color.NRGBA{R: 86, G: 156, B: 214, A: 255},  // language constants
+	String:      color.NRGBA{R: 206, G: 145, B: 120, A: 255},
+	Number:      color.NRGBA{R: 181, G: 206, B: 168, A: 255},
+	Bool:        color.NRGBA{R: 86, G: 156, B: 214, A: 255},
 	Null:        color.NRGBA{R: 86, G: 156, B: 214, A: 255},
-	Key:         color.NRGBA{R: 156, G: 220, B: 254, A: 255}, // property names
+	Key:         color.NRGBA{R: 156, G: 220, B: 254, A: 255},
 	Punctuation: color.NRGBA{R: 212, G: 212, B: 212, A: 255},
 	Operator:    color.NRGBA{R: 212, G: 212, B: 212, A: 255},
 	Keyword:     color.NRGBA{R: 197, G: 134, B: 192, A: 255},
@@ -299,9 +272,6 @@ var githubLightSyntax = syntaxPalette{
 	},
 }
 
-// VS Code Monokai Dimmed (extensions/theme-monokai-dimmed). Strings
-// are olive (#9AA83A), numbers + literals slate-blue (#6089B4), keys
-// gray (#9DA39A), comments dim gray (#9A9A9A).
 var monokaiDimmedSyntax = syntaxPalette{
 	Plain:       color.NRGBA{R: 193, G: 193, B: 193, A: 255},
 	String:      color.NRGBA{R: 154, G: 168, B: 58, A: 255},
@@ -321,9 +291,6 @@ var monokaiDimmedSyntax = syntaxPalette{
 	},
 }
 
-// VS Code Abyss (extensions/theme-abyss). Strings green (#22AA44),
-// numbers pink (#F280D0), keywords/literals dim blue (#225588),
-// comments deep blue (#384887).
 var abyssSyntax = syntaxPalette{
 	Plain:       color.NRGBA{R: 108, G: 149, B: 235, A: 255},
 	String:      color.NRGBA{R: 34, G: 170, B: 68, A: 255},
@@ -343,9 +310,6 @@ var abyssSyntax = syntaxPalette{
 	},
 }
 
-// VS Code Kimbie Dark (extensions/theme-kimbie-dark). Strings olive
-// (#889B4A), numbers/literals orange (#F79A32), comments tan
-// (#A57A4C).
 var kimbieDarkSyntax = syntaxPalette{
 	Plain:       color.NRGBA{R: 211, G: 175, B: 134, A: 255},
 	String:      color.NRGBA{R: 136, G: 155, B: 74, A: 255},
@@ -365,9 +329,6 @@ var kimbieDarkSyntax = syntaxPalette{
 	},
 }
 
-// Nord theme (arcticicestudio/nord-visual-studio-code). Strings green
-// (#A3BE8C), numbers magenta (#B48EAD), keywords blue (#81A1C1),
-// keys/types frost cyan (#8FBCBB), comments dim (#616E88).
 var nordSyntax = syntaxPalette{
 	Plain:       color.NRGBA{R: 216, G: 222, B: 233, A: 255},
 	String:      color.NRGBA{R: 163, G: 190, B: 140, A: 255},
@@ -387,9 +348,6 @@ var nordSyntax = syntaxPalette{
 	},
 }
 
-// VS Code Tomorrow Night Blue (extensions/theme-tomorrow-night-blue).
-// Strings green (#D1F1A9), numbers + literals orange (#FFC58F),
-// keys cream (#FFEEAD), keywords lavender (#EBBBFF).
 var tomorrowNightBlueSyntax = syntaxPalette{
 	Plain:       color.NRGBA{R: 255, G: 255, B: 255, A: 255},
 	String:      color.NRGBA{R: 209, G: 241, B: 169, A: 255},
@@ -409,8 +367,6 @@ var tomorrowNightBlueSyntax = syntaxPalette{
 	},
 }
 
-// VS Code Red (extensions/theme-red). Strings peach (#FFC9A1), numbers
-// red (#F33A15), keywords orange (#FB9A4B), comments rose (#E64640).
 var redSyntax = syntaxPalette{
 	Plain:       color.NRGBA{R: 243, G: 224, B: 224, A: 255},
 	String:      color.NRGBA{R: 255, G: 201, B: 161, A: 255},
@@ -430,9 +386,6 @@ var redSyntax = syntaxPalette{
 	},
 }
 
-// VS Code Quiet Light (extensions/theme-quietlight). Strings green
-// (#448C27), numbers brown (#AB6526), keys blue (#4F76AC), keywords
-// (#4B83CD).
 var quietLightSyntax = syntaxPalette{
 	Plain:       color.NRGBA{R: 51, G: 51, B: 51, A: 255},
 	String:      color.NRGBA{R: 68, G: 140, B: 39, A: 255},
@@ -452,8 +405,6 @@ var quietLightSyntax = syntaxPalette{
 	},
 }
 
-// Globals consumed by the response viewer at paint time. Updated by
-// applyPalette whenever the active theme changes.
 var (
 	colorSyntax syntaxPalette
 )

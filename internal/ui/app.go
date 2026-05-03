@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/nanorele/gio-x/explorer"
@@ -48,9 +49,9 @@ var (
 	iconMenu     *widget.Icon
 	iconSearch   *widget.Icon
 	iconBug      *widget.Icon
-	iconDropDown    *widget.Icon
-	iconChevronR    *widget.Icon
-	iconChevronD    *widget.Icon
+	iconDropDown *widget.Icon
+	iconChevronR *widget.Icon
+	iconChevronD *widget.Icon
 )
 
 func init() {
@@ -114,16 +115,12 @@ type AppUI struct {
 	EnvList          widget.List
 	EnvLoadedChan    chan *EnvironmentUI
 	SidebarEnvHeight int
-	// envRowH / colRowH are measured from the first rendered row each
-	// frame; used by the sidebar's vertical-divider drag handler to
-	// snap the envs/cols section heights to a whole number of rows
-	// when the user releases the drag, so no row is left half-cut.
-	// Both stay at 0 until the first paint.
-	envRowH int
-	colRowH int
-	SidebarEnvDrag   gesture.Drag
-	SidebarEnvDragY  float32
-	EditingEnv       *EnvironmentUI
+
+	envRowH         int
+	colRowH         int
+	SidebarEnvDrag  gesture.Drag
+	SidebarEnvDragY float32
+	EditingEnv      *EnvironmentUI
 
 	RenamingNode *CollectionNode
 
@@ -180,6 +177,7 @@ type AppUI struct {
 	activeEnvVars           map[string]string
 	activeEnvDirty          bool
 	saveNeeded              bool
+	stateSaveMu             sync.Mutex
 	dirtyCollections        map[string]*dirtyCollection
 	collectionFlushTimerSet bool
 	rootCtx                 context.Context
@@ -189,18 +187,9 @@ type AppUI struct {
 	tabRowsBuf [][]int
 	tabRowBuf  []int
 
-	// Title is the brand label shown in the title bar. Set by the caller
-	// (cmd/main.go) so the binary can be rebranded without touching UI
-	// code. Falls back to "Tracto" when empty.
 	Title string
 }
 
-// ttfFS embeds the entire bundled font directory. Going through embed.FS
-// (rather than per-file `//go:embed []byte` vars) lets us treat the Inter
-// UI font as optional: drop the four Inter-*.ttf files into
-// assets/fonts/ttf and they'll be picked up automatically; without them
-// the build still succeeds and we fall back to Go Sans.
-//
 //go:embed assets/fonts/ttf
 var ttfFS embed.FS
 
@@ -208,42 +197,11 @@ func loadEmbeddedTTF(name string) ([]byte, error) {
 	return ttfFS.ReadFile("assets/fonts/ttf/" + name)
 }
 
-// jetbrainsMonoTypeface is the Typeface name registered for the four
-// embedded JetBrains Mono faces below. Anything wanting the bundled
-// monospace font (request body editor, response viewer, var chips,
-// etc.) sets `font.Font{Typeface: jetbrainsMonoTypeface}` and gio
-// resolves it to the appropriate Style/Weight from this collection
-// without touching system font files.
 const jetbrainsMonoTypeface font.Typeface = "JetBrains Mono"
 
 func NewAppUI() *AppUI {
 	th := material.NewTheme()
 
-	// Default UI face: try Inter first, fall back to Go Sans.
-	//
-	// Inter (rsms.me/inter, SIL OFL 1.1) is a humanist sans-serif tuned
-	// specifically for screen UI — its hinting and weights are designed
-	// to stay legible across the four contrast modes the app exposes via
-	// themes (black-on-white, gray-on-white, gray-on-black, white-on-
-	// black). It also covers Latin + full Cyrillic, so transliterated
-	// labels in environments / collections render correctly.
-	//
-	// Drop these files into internal/ui/assets/fonts/ttf to enable Inter:
-	//   Inter-Regular.ttf
-	//   Inter-Bold.ttf
-	//   Inter-Italic.ttf
-	//   Inter-BoldItalic.ttf
-	// Without them the build still works; we just keep using Go Sans.
-	//
-	// We must use face.Font() (the metadata extracted from the TTF) for
-	// the FontFace's Font field rather than building one ourselves. The
-	// gio shaper feeds collection's Typeface strings into fontscan as a
-	// fallback families list when Font.Typeface is empty (the default
-	// for material.Label). If we register Inter with Typeface=""
-	// ourselves, fontscan's families query is ["", "", ...] which can't
-	// reliably resolve to the right face — labels show no glyphs because
-	// the empty-name lookup races against the empty-named NotoColorEmoji
-	// face that ships in the same collection.
 	var fonts []font.FontFace
 	addUIFace := func(name string) bool {
 		b, err := loadEmbeddedTTF(name)
@@ -412,9 +370,7 @@ func (ui *AppUI) refreshActiveEnv() {
 		if e.Data.ID == ui.ActiveEnvID {
 			ui.activeEnvVars = make(map[string]string)
 			for _, v := range e.Data.Vars {
-				// Treat empty value as "not defined" — keeps a row
-				// around in the env editor without the variable
-				// counting as resolved at substitution time.
+
 				if v.Enabled && v.Value != "" {
 					ui.activeEnvVars[v.Key] = v.Value
 				}
@@ -488,7 +444,7 @@ func (ui *AppUI) addNewEnvironment() {
 }
 
 func (ui *AppUI) importDroppedData(data []byte) {
-	// Try parsing as collection
+
 	id, _ := saveCollectionRaw(data)
 	col, err := ParseCollection(bytes.NewReader(data), id)
 	if err == nil && col != nil && col.Name != "" {
@@ -497,7 +453,6 @@ func (ui *AppUI) importDroppedData(data []byte) {
 		return
 	}
 
-	// Try parsing as environment
 	envID, _ := saveEnvironmentRaw(data)
 	env, err := ParseEnvironment(bytes.NewReader(data), envID)
 	if err == nil && env != nil && env.Name != "" {
@@ -531,12 +486,6 @@ func (ui *AppUI) Run() error {
 		case app.ConfigEvent:
 			ui.IsMaximized = e.Config.Mode == app.Maximized || e.Config.Mode == app.Fullscreen
 		case app.FrameEvent:
-			// Global pointer tracking is wired up inside layoutApp via
-			// gtx.Event + a window-level event.Op so the tag actually
-			// gets registered as a pointer target. The previous attempt
-			// here passed a pointer.Filter to event.Op (which expects a
-			// Tag), so no events ever reached `ui` and GlobalPointerPos
-			// stayed at (0, 0) — breaking the var popup positioning.
 
 			for {
 				select {
@@ -581,17 +530,11 @@ func (ui *AppUI) Run() error {
 
 func (ui *AppUI) loadState() {
 	state, raw := loadStateWithRaw()
-	// Older builds wrote a "mono_font" setting that has since been
-	// removed (font is now hardcoded to JetBrains Mono). json.Unmarshal
-	// silently drops unknown fields, but the file on disk still carries
-	// them until the next write. Mark state dirty so flushSaveState
-	// rewrites it in canonical form at the end of the first frame.
+
 	if bytes.Contains(raw, []byte(`"mono_font"`)) {
 		ui.saveNeeded = true
 	}
-	// Apply settings BEFORE constructing tabs so NewRequestTab picks up
-	// the user's DefaultMethod / DefaultSplitRatio rather than the
-	// transient defaults from the constructor's earlier applyAppSettings call.
+
 	if state.Settings != nil {
 		ui.Settings = state.Settings.sanitized()
 	} else {
@@ -623,9 +566,30 @@ func (ui *AppUI) loadState() {
 		}
 		tab.pendingColID = ts.CollectionID
 		tab.pendingNodePath = ts.NodePath
-		// Recompute Content-Type / User-Agent from the loaded body and
-		// active settings — without this, a tab restored from disk shows
-		// no Content-Type header until the user touches the body.
+		tab.BodyType = BodyTypeFromMode(ts.BodyType)
+		for _, fp := range ts.FormParts {
+			kind := FormPartText
+			if fp.Kind == "file" {
+				kind = FormPartFile
+			}
+			var size int64
+			if kind == FormPartFile && fp.FilePath != "" {
+				if fi, err := os.Stat(fp.FilePath); err == nil {
+					size = fi.Size()
+				}
+			}
+			tab.FormParts = append(tab.FormParts, newFormPart(fp.Key, fp.Value, kind, fp.FilePath, size))
+		}
+		for _, ue := range ts.URLEncoded {
+			tab.URLEncoded = append(tab.URLEncoded, newURLEncodedPart(ue.Key, ue.Value))
+		}
+		tab.BinaryFilePath = ts.BinaryPath
+		if ts.BinaryPath != "" {
+			if fi, err := os.Stat(ts.BinaryPath); err == nil {
+				tab.BinaryFileSize = fi.Size()
+			}
+		}
+
 		tab.updateSystemHeaders()
 		ui.Tabs = append(ui.Tabs, tab)
 	}
@@ -679,6 +643,26 @@ func (ui *AppUI) buildStateSnapshot() AppState {
 			SplitRatio:       tab.SplitRatio,
 			HeaderSplitRatio: tab.HeaderSplitRatio,
 			ReqWrapEnabled:   &reqWrap,
+			BodyType:         tab.BodyType.PostmanMode(),
+			BinaryPath:       tab.BinaryFilePath,
+		}
+		for _, p := range tab.FormParts {
+			kind := "text"
+			if p.Kind == FormPartFile {
+				kind = "file"
+			}
+			ts.FormParts = append(ts.FormParts, FormPartState{
+				Key:      p.Key.Text(),
+				Kind:     kind,
+				Value:    p.Value.Text(),
+				FilePath: p.FilePath,
+			})
+		}
+		for _, ue := range tab.URLEncoded {
+			ts.URLEncoded = append(ts.URLEncoded, HeaderState{
+				Key:   ue.Key.Text(),
+				Value: ue.Value.Text(),
+			})
 		}
 		if tab.LinkedNode != nil && tab.LinkedNode.Collection != nil {
 			ts.CollectionID = tab.LinkedNode.Collection.ID
@@ -701,9 +685,12 @@ func (ui *AppUI) buildStateSnapshot() AppState {
 func (ui *AppUI) saveStateSync() {
 	state := ui.buildStateSnapshot()
 	data, err := json.MarshalIndent(state, "", "  ")
-	if err == nil {
-		os.WriteFile(getStateFile(), data, 0644)
+	if err != nil {
+		return
 	}
+	ui.stateSaveMu.Lock()
+	defer ui.stateSaveMu.Unlock()
+	atomicWriteFile(getStateFile(), data)
 }
 
 func (ui *AppUI) saveState() {
@@ -718,9 +705,12 @@ func (ui *AppUI) flushSaveState() {
 	state := ui.buildStateSnapshot()
 	go func() {
 		data, err := json.MarshalIndent(state, "", "  ")
-		if err == nil {
-			os.WriteFile(getStateFile(), data, 0644)
+		if err != nil {
+			return
 		}
+		ui.stateSaveMu.Lock()
+		defer ui.stateSaveMu.Unlock()
+		atomicWriteFile(getStateFile(), data)
 	}()
 }
 
@@ -764,8 +754,8 @@ func (ui *AppUI) flushCollectionSaves() {
 		return
 	}
 	type snap struct {
-		id  string
-		ext *ExtCollection
+		id   string
+		data []byte
 	}
 	var snaps []snap
 	now := time.Now()
@@ -775,8 +765,8 @@ func (ui *AppUI) flushCollectionSaves() {
 			pending = true
 			continue
 		}
-		if _, ext := snapshotCollection(e.col); ext != nil {
-			snaps = append(snaps, snap{id, ext})
+		if _, data := snapshotCollection(e.col); len(data) > 0 {
+			snaps = append(snaps, snap{id, data})
 		}
 		delete(ui.dirtyCollections, id)
 	}
@@ -788,7 +778,7 @@ func (ui *AppUI) flushCollectionSaves() {
 	}
 	go func() {
 		for _, s := range snaps {
-			writeCollectionFile(s.id, s.ext)
+			writeCollectionFile(s.id, s.data)
 		}
 	}()
 }
@@ -820,8 +810,26 @@ func (ui *AppUI) openRequestInTab(node *CollectionNode) {
 	for k, v := range req.Headers {
 		tab.addHeader(k, v)
 	}
-	// Sync auto-managed headers (Content-Type, User-Agent) so the new
-	// tab matches what would be sent on first request.
+	tab.BodyType = req.BodyType
+	for _, fp := range req.FormParts {
+		var size int64
+		if fp.Kind == FormPartFile && fp.FilePath != "" {
+			if fi, err := os.Stat(fp.FilePath); err == nil {
+				size = fi.Size()
+			}
+		}
+		tab.FormParts = append(tab.FormParts, newFormPart(fp.Key, fp.Value, fp.Kind, fp.FilePath, size))
+	}
+	for _, kv := range req.URLEncoded {
+		tab.URLEncoded = append(tab.URLEncoded, newURLEncodedPart(kv.Key, kv.Value))
+	}
+	tab.BinaryFilePath = req.BinaryPath
+	if req.BinaryPath != "" {
+		if fi, err := os.Stat(req.BinaryPath); err == nil {
+			tab.BinaryFileSize = fi.Size()
+		}
+	}
+
 	tab.updateSystemHeaders()
 
 	if len(ui.Tabs) > 0 && ui.ActiveIdx >= 0 && ui.ActiveIdx < len(ui.Tabs) {
@@ -835,11 +843,7 @@ func (ui *AppUI) openRequestInTab(node *CollectionNode) {
 }
 
 func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
-	// Pull window-level pointer tracking from the previous frame so
-	// GlobalPointerPos reflects the cursor's window-coords this frame.
-	// Position comes back relative to the area where the matching
-	// event.Op tag is registered (below) — without a clip, that's the
-	// full frame, which is what we want.
+
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
 			Target: ui,
@@ -854,24 +858,9 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 		}
 		ui.LastPointerPos = pe.Position
 		if pe.Kind == pointer.Press {
-			// Background focus-drop. The root tag's area covers the
-			// full window, so it sees every Press in the frame.
-			// Widgets that want focus (request/response editors, the
-			// URL field, header editors, etc.) call FocusCmd{Tag:
-			// self} from their own click handler — those run after
-			// us this frame, so their command overrides this nil
-			// reset. Clicks on chrome (toolbars, dividers, scrollbar
-			// gutter, etc.) leave the nil reset in place, which is
-			// what makes the request editor's caret disappear when
-			// the user clicks anywhere outside it.
+
 			gtx.Execute(key.FocusCmd{Tag: nil})
 
-			// Click-outside-the-env-editor dismiss. The env editor
-			// occupies the area to the right of the sidebar (and
-			// below the title bar). Any press in the sidebar
-			// commits the draft and closes the editor — same idea
-			// as clicking the BackBtn but covers the natural "I'm
-			// done, switch to a different env / collection" flow.
 			if ui.EditingEnv != nil && !ui.SettingsOpen {
 				sidebarRight := 0
 				if !ui.Settings.HideSidebar {
@@ -887,10 +876,7 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 		}
 	}
 	event.Op(gtx.Ops, ui)
-	// GlobalVarHover is *not* reset each frame — it's now driven by
-	// pointer.Enter / pointer.Leave events on each var chip's tag, so
-	// it persists between frames while the cursor stays inside a chip
-	// and clears on Leave.
+
 	GlobalPointerPos = ui.LastPointerPos
 
 	dim := layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -906,7 +892,6 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 		}),
 	)
 
-	// Handle popup/menu closing when clicking outside
 	anySidebarMenuOpen := false
 	for _, n := range ui.VisibleCols {
 		if n.MenuOpen {
@@ -918,7 +903,7 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 	if ui.ActiveIdx >= 0 && ui.ActiveIdx < len(ui.Tabs) {
 		activeTab = ui.Tabs[ui.ActiveIdx]
 	}
-	tabMenuOpen := activeTab != nil && (activeTab.SendMenuOpen || activeTab.MethodListOpen)
+	tabMenuOpen := activeTab != nil && (activeTab.SendMenuOpen || activeTab.MethodListOpen || activeTab.BodyTypeOpen)
 
 	closeAllPopups := func() {
 		ui.TabCtxMenuOpen = false
@@ -926,6 +911,7 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 		if activeTab != nil {
 			activeTab.SendMenuOpen = false
 			activeTab.MethodListOpen = false
+			activeTab.BodyTypeOpen = false
 		}
 	}
 
@@ -951,12 +937,12 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 					}
 				}
 				event.Op(gtx.Ops, &ui.PopupCloseTag)
+				pointer.CursorDefault.Add(gtx.Ops)
 				return layout.Dimensions{Size: gtx.Constraints.Max}
 			}),
 		)
 	}
 
-	// Handle variable hover tooltip
 	if GlobalVarHover != nil && !ui.VarPopupOpen {
 		var val string
 		found := false
@@ -964,47 +950,67 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 			val, found = ui.activeEnvVars[GlobalVarHover.Name]
 		}
 
-		macro := op.Record(gtx.Ops)
-		op.Offset(image.Pt(int(GlobalVarHover.Pos.X)+10, int(GlobalVarHover.Pos.Y)+20)).Add(gtx.Ops)
+		popupGtx := gtx
+		popupGtx.Constraints.Min = image.Point{}
+		popupGtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(360)))
 
-		func(gtx layout.Context) layout.Dimensions {
-			return layout.Stack{}.Layout(gtx,
-				layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-					paint.FillShape(gtx.Ops, colorBgPopup, clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 4).Op(gtx.Ops))
-					return layout.Dimensions{Size: gtx.Constraints.Min}
-				}),
-				layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-					return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.Theme, unit.Sp(10), GlobalVarHover.Name)
-								lbl.Color = colorFgMuted
-								lbl.Font.Weight = font.Bold
-								return lbl.Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								txt := val
-								col := colorWhite
-								if !found {
-									txt = "Not found in active environment"
-									col = colorDanger
-								}
-								lbl := material.Label(ui.Theme, unit.Sp(12), txt)
-								lbl.Color = col
-								return lbl.Layout(gtx)
-							}),
-							layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.Theme, unit.Sp(9), "Click to edit/select")
-								lbl.Color = colorAccent
-								return lbl.Layout(gtx)
-							}),
-						)
-					})
-				}),
-			)
-		}(gtx)
-		op.Defer(gtx.Ops, macro.Stop())
+		contentMacro := op.Record(gtx.Ops)
+		contentDims := layout.Stack{}.Layout(popupGtx,
+			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+				rr := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 4)
+				paint.FillShape(gtx.Ops, colorBgPopup, rr.Op(gtx.Ops))
+				bw := gtx.Dp(unit.Dp(2))
+				paint.FillShape(gtx.Ops, colorBorder, clip.Stroke{
+					Path:  clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, 4).Path(gtx.Ops),
+					Width: float32(bw),
+				}.Op())
+				return layout.Dimensions{Size: gtx.Constraints.Min}
+			}),
+			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+				return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Label(ui.Theme, unit.Sp(10), GlobalVarHover.Name)
+							lbl.Color = colorFgMuted
+							lbl.Font.Weight = font.Bold
+							return lbl.Layout(gtx)
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							txt := val
+							col := colorWhite
+							if !found {
+								txt = "Not found in active environment"
+								col = colorDanger
+							}
+							lbl := material.Label(ui.Theme, unit.Sp(12), txt)
+							lbl.Color = col
+							return lbl.Layout(gtx)
+						}),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Label(ui.Theme, unit.Sp(9), "Click to edit/select")
+							lbl.Color = colorAccent
+							return lbl.Layout(gtx)
+						}),
+					)
+				})
+			}),
+		)
+		contentCall := contentMacro.Stop()
+
+		px := int(GlobalVarHover.Pos.X)
+		py := int(GlobalVarHover.Pos.Y)
+		if px+contentDims.Size.X > gtx.Constraints.Max.X {
+			px = gtx.Constraints.Max.X - contentDims.Size.X
+		}
+		if px < 0 {
+			px = 0
+		}
+
+		deferMacro := op.Record(gtx.Ops)
+		op.Offset(image.Pt(px, py)).Add(gtx.Ops)
+		contentCall.Add(gtx.Ops)
+		op.Defer(gtx.Ops, deferMacro.Stop())
 	}
 
 	if GlobalVarClick != nil {
@@ -1028,10 +1034,6 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 		ui.layoutVarPopup(gtx)
 	}
 
-	// Settings color picker — rendered as a deferred overlay on top of
-	// everything so it floats over the rest of the settings panel
-	// (matches the method dropdown's behaviour). The picker's own
-	// gestures handle drag input within the deferred area.
 	if ui.SettingsOpen && ui.SettingsState != nil && ui.SettingsState.ColorPicker.isOpen() {
 		ui.layoutColorPickerOverlay(gtx)
 	}
@@ -1039,20 +1041,12 @@ func (ui *AppUI) layoutApp(gtx layout.Context) layout.Dimensions {
 	return dim
 }
 
-// layoutColorPickerOverlay renders the inline HSV picker as a deferred
-// overlay anchored near where the user clicked the swatch. Uses
-// op.Defer so the picker draws on top of all preceding ops in the
-// current frame. A full-window backdrop registered inside the same
-// macro detects Press events outside the picker rect and dismisses it
-// — same click-outside-to-close pattern the var popup uses.
 func (ui *AppUI) layoutColorPickerOverlay(gtx layout.Context) {
 	p := &ui.SettingsState.ColorPicker
 	pickerW := gtx.Dp(unit.Dp(240))
 	pickerH := gtx.Dp(unit.Dp(216))
 	gap := gtx.Dp(unit.Dp(6))
 
-	// Anchor below the cursor, flipped above if there's no room. Then
-	// clamp to keep the popup fully on-screen.
 	px := int(p.anchor.X) + gap
 	py := int(p.anchor.Y) + gap
 	if px+pickerW > gtx.Constraints.Max.X {
@@ -1071,12 +1065,6 @@ func (ui *AppUI) layoutColorPickerOverlay(gtx layout.Context) {
 
 	macro := op.Record(gtx.Ops)
 
-	// Backdrop covers the whole window. event.Op registers a tag whose
-	// pointer.Filter catches every Press; presses inside pickerRect are
-	// the user driving the picker (drag SV, hue, click Close), so we
-	// ignore them — anything else means "click outside" and closes the
-	// picker. Backdrop is drawn before the picker so the picker still
-	// renders on top within the same op.Defer.
 	backdropStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
@@ -1097,9 +1085,9 @@ func (ui *AppUI) layoutColorPickerOverlay(gtx layout.Context) {
 		p.closePicker()
 	}
 	event.Op(gtx.Ops, &p.backdrop)
+	pointer.CursorDefault.Add(gtx.Ops)
 	backdropStack.Pop()
 
-	// Picker on top of the backdrop.
 	pickerOff := op.Offset(image.Pt(px, py)).Push(gtx.Ops)
 	pickerGtx := gtx
 	pickerGtx.Constraints.Min = image.Pt(pickerW, pickerH)
@@ -1117,8 +1105,7 @@ func (ui *AppUI) layoutVarPopup(gtx layout.Context) {
 	}
 
 	gap := gtx.Dp(unit.Dp(4))
-	// VarPopupPos is the bottom-left corner of the variable chip in window
-	// coords, so the popup naturally appears flush under the variable.
+
 	px := int(ui.VarPopupPos.X)
 	py := int(ui.VarPopupPos.Y) + gap
 	if px+popupW > gtx.Constraints.Max.X {
@@ -1128,7 +1115,7 @@ func (ui *AppUI) layoutVarPopup(gtx layout.Context) {
 		px = 0
 	}
 	if py+popupH > gtx.Constraints.Max.Y {
-		// Flip above the chip if there's no room below.
+
 		py = int(ui.VarPopupPos.Y) - popupH - gap
 	}
 	if py < 0 {
@@ -1152,11 +1139,7 @@ func (ui *AppUI) layoutVarPopup(gtx layout.Context) {
 				if !ok {
 					continue
 				}
-				// Ignore clicks that land inside the popup body — they belong to
-				// the popup itself (env menu, value editor, etc.) and shouldn't
-				// dismiss it. Backdrop receives all presses because gio
-				// dispatches each event to every matching tag, not just the
-				// topmost.
+
 				p := image.Pt(int(pe.Position.X), int(pe.Position.Y))
 				if p.In(popupRect) {
 					continue
@@ -1166,6 +1149,7 @@ func (ui *AppUI) layoutVarPopup(gtx layout.Context) {
 				ui.VarPopupEnvMenuOpen = false
 			}
 			event.Op(gtx.Ops, &ui.VarPopupOpen)
+			pointer.CursorDefault.Add(gtx.Ops)
 			return layout.Dimensions{Size: gtx.Constraints.Max}
 		}),
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
@@ -1208,10 +1192,7 @@ func (ui *AppUI) layoutVarPopup(gtx layout.Context) {
 }
 
 func (ui *AppUI) layoutVarPopupEnvSelect(gtx layout.Context) layout.Dimensions {
-	// widget.List.Axis defaults to Horizontal (zero value), which made
-	// the env dropdown render as a horizontal strip — only the first
-	// 1-2 environments fit before being clipped. Force Vertical so the
-	// list scrolls as expected.
+
 	ui.VarPopupEnvList.Axis = layout.Vertical
 	if ui.VarPopupEnvBtn.Clicked(gtx) {
 		ui.VarPopupEnvMenuOpen = !ui.VarPopupEnvMenuOpen
@@ -1234,7 +1215,7 @@ func (ui *AppUI) layoutVarPopupEnvSelect(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return material.Clickable(gtx, &ui.VarPopupEnvBtn, func(gtx layout.Context) layout.Dimensions {
-				size := image.Pt(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(30)))
+				size := image.Pt(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(26)))
 				gtx.Constraints.Min = size
 				gtx.Constraints.Max = size
 				paint.FillShape(gtx.Ops, colorBgField, clip.UniformRRect(image.Rectangle{Max: size}, 4).Op(gtx.Ops))
@@ -1248,6 +1229,7 @@ func (ui *AppUI) layoutVarPopupEnvSelect(gtx layout.Context) layout.Dimensions {
 				return layout.Inset{Left: unit.Dp(10), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							gtx.Constraints.Min.Y = 0
 							lbl := material.Label(ui.Theme, unit.Sp(12), currentName)
 							lbl.MaxLines = 1
 							lbl.Truncator = "…"
@@ -1377,9 +1359,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 		if e, ok := ev.(key.Event); ok && e.State == key.Press {
 			switch e.Name {
 			case "S":
-				// Save target depends on what's currently focused/open:
-				// settings → flush draft, env editor → save env (no close,
-				// per task 3), otherwise → save active tab to collection.
+
 				switch {
 				case ui.SettingsOpen:
 					ui.applyDraftSettings()
@@ -1412,11 +1392,6 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 		}
 	}
 
-	// Over-limit "Load from file" handler — lives here because the
-	// Explorer is owned by AppUI. Each tab's RequestEditor exposes
-	// OversizeMsg() and the click flag via LoadFromFileBtn; we route
-	// the chosen file's contents back through LoadFromReader, which
-	// re-checks the 100 MB ceiling.
 	for i := range ui.Tabs {
 		tab := ui.Tabs[i]
 		for tab.LoadFromFileBtn.Clicked(gtx) {
@@ -1563,14 +1538,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 						defer clip.Rect{Max: size}.Push(gtx.Ops).Pop()
 						pointer.CursorColResize.Add(gtx.Ops)
 						ui.SidebarDrag.Add(gtx.Ops)
-						// gio only honours the cursor hint over an area
-						// that actively listens for pointer events. The
-						// drag gesture only subscribes to press/drag, so
-						// hover (no buttons held) wouldn't trigger the
-						// cursor change. Subscribe to Move/Enter/Leave on
-						// a private tag and discard the events — the
-						// subscription itself is what makes the cursor
-						// hint take effect during plain hover.
+
 						event.Op(gtx.Ops, &ui.SidebarDrag)
 						for {
 							_, ok := gtx.Event(pointer.Filter{Target: &ui.SidebarDrag, Kinds: pointer.Move | pointer.Enter | pointer.Leave})
@@ -1646,7 +1614,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 								}
 
 								isDragging := ui.SidebarDrag.Dragging() || ui.SidebarEnvDrag.Dragging()
-								return tab.layout(gtx, ui.Theme, ui.Window, ui.activeEnvVars, isDragging, func() {
+								return tab.layout(gtx, ui.Theme, ui.Window, ui.Explorer, ui.activeEnvVars, isDragging, func() {
 									ui.saveState()
 								}, ui.markCollectionDirty)
 							}
@@ -1698,9 +1666,7 @@ func (ui *AppUI) layoutContent(gtx layout.Context) layout.Dimensions {
 			}
 
 			macro := op.Record(gtx.Ops)
-			// Offset relative to layoutContent:
-			// X: sidebar (width) + splitter (4) + tab bar inset (4) = sidebar + 8
-			// Y: tab bar inset (8)
+
 			offX := int(ui.TabCtxMenuPos.X) + ui.SidebarWidth + gtx.Dp(unit.Dp(8))
 			offY := int(ui.TabCtxMenuPos.Y) + gtx.Dp(unit.Dp(8))
 			op.Offset(image.Pt(offX, offY)).Add(gtx.Ops)

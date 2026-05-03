@@ -27,7 +27,6 @@ func TestTitleBarLayout(t *testing.T) {
 
 	ui.layoutTitleBar(gtx)
 
-	// Test Button Clicks
 	ui.BtnMinimize.Click()
 	ui.layoutTitleBar(gtx)
 
@@ -37,7 +36,7 @@ func TestTitleBarLayout(t *testing.T) {
 		t.Errorf("expected maximized")
 	}
 
-	ui.BtnMaximize.Click() // Toggle off
+	ui.BtnMaximize.Click()
 	ui.layoutTitleBar(gtx)
 	if ui.IsMaximized {
 		t.Errorf("expected unmaximized")
@@ -46,14 +45,12 @@ func TestTitleBarLayout(t *testing.T) {
 	ui.BtnClose.Click()
 	ui.layoutTitleBar(gtx)
 
-	// Test Title Button variants
 	ui.layoutTitleBtn(gtx, &ui.BtnMinimize, 0)
 	ui.layoutTitleBtn(gtx, &ui.BtnMaximize, 1)
 	ui.IsMaximized = true
 	ui.layoutTitleBtn(gtx, &ui.BtnMaximize, 2)
 	ui.layoutTitleBtn(gtx, &ui.BtnClose, 3)
 
-	// Test Settings button toggles state
 	ui.IsMaximized = false
 	ui.SettingsOpen = false
 	ui.SettingsBtn.Click()
@@ -87,19 +84,14 @@ func TestTitleBarSettingsButtonHitArea(t *testing.T) {
 		Source:      router.Source(),
 	}
 
-	// Render once so click area is registered.
 	ui.layoutTitleBar(gtx)
 	router.Frame(ops)
 
-	// "Tracto" 14sp ≈ 50px wide; 12dp left pad + label + 8dp gap → button starts ~70px in.
-	// Settings button content (icon + spacer + text + 20px inset) ≈ 90px wide.
-	// Click in the middle of the expected button area.
 	router.Queue(
 		pointer.Event{Kind: pointer.Press, Position: f32.Pt(110, 15), Buttons: pointer.ButtonPrimary, Source: pointer.Mouse},
 		pointer.Event{Kind: pointer.Release, Position: f32.Pt(110, 15), Buttons: pointer.ButtonPrimary, Source: pointer.Mouse},
 	)
 
-	// Re-render so Clickable.update consumes the queued events.
 	ops.Reset()
 	gtx.Ops = ops
 	ui.layoutTitleBar(gtx)
@@ -108,7 +100,6 @@ func TestTitleBarSettingsButtonHitArea(t *testing.T) {
 		t.Errorf("expected SettingsOpen=true after pointer click in button area")
 	}
 
-	// Click outside the button (in the flexed drag area, e.g. x=600) should NOT toggle.
 	router.Frame(ops)
 	router.Queue(
 		pointer.Event{Kind: pointer.Press, Position: f32.Pt(600, 15), Buttons: pointer.ButtonPrimary, Source: pointer.Mouse},

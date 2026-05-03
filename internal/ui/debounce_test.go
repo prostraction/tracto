@@ -1,9 +1,9 @@
 package ui
 
 import (
+	"github.com/nanorele/gio/app"
 	"testing"
 	"time"
-	"github.com/nanorele/gio/app"
 )
 
 func TestDebounce(t *testing.T) {
@@ -13,11 +13,9 @@ func TestDebounce(t *testing.T) {
 	if timer == nil {
 		t.Errorf("expected timer to be armed")
 	}
-	
-	// re-arm
+
 	armInvalidateTimer(&timer, win, 1*time.Millisecond)
-	
-	// test nil win
+
 	var timer2 *time.Timer
 	armInvalidateTimer(&timer2, nil, 1*time.Millisecond)
 	if timer2 != nil {

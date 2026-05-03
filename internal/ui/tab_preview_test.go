@@ -1,12 +1,12 @@
 package ui
 
 import (
+	"github.com/nanorele/gio/app"
+	"github.com/nanorele/gio/widget"
 	"os"
 	"strings"
 	"testing"
 	"time"
-	"github.com/nanorele/gio/app"
-	"github.com/nanorele/gio/widget"
 )
 
 func TestLooksLikeJSON(t *testing.T) {
@@ -38,22 +38,19 @@ func TestLooksLikeJSON(t *testing.T) {
 
 func TestIndentWrite(t *testing.T) {
 	var sb strings.Builder
-	
-	// Test normal
+
 	sb.Reset()
 	indentWrite(&sb, 1)
 	if !strings.Contains(sb.String(), "  ") {
 		t.Errorf("expected indentation")
 	}
-	
-	// Test max depth
+
 	sb.Reset()
 	indentWrite(&sb, 100)
 	if !strings.Contains(sb.String(), "  ") {
 		t.Errorf("expected indentation even at max depth (capped)")
 	}
-	
-	// Test negative
+
 	sb.Reset()
 	indentWrite(&sb, -1)
 	if sb.Len() != 0 {
@@ -69,51 +66,51 @@ func TestFormatJSON(t *testing.T) {
 		expected string
 	}{
 		{
-			name:  "simple object",
-			input: `{"a":1}`,
-			state: &JSONFormatterState{},
+			name:     "simple object",
+			input:    `{"a":1}`,
+			state:    &JSONFormatterState{},
 			expected: "{\n  \"a\": 1\n}",
 		},
 		{
-			name:  "nested object",
-			input: `{"a":{"b":2}}`,
-			state: &JSONFormatterState{},
+			name:     "nested object",
+			input:    `{"a":{"b":2}}`,
+			state:    &JSONFormatterState{},
 			expected: "{\n  \"a\": {\n    \"b\": 2\n  }\n}",
 		},
 		{
-			name:  "array",
-			input: `[1, 2]`,
-			state: &JSONFormatterState{},
+			name:     "array",
+			input:    `[1, 2]`,
+			state:    &JSONFormatterState{},
 			expected: "[\n  1,\n  2\n]",
 		},
 		{
-			name:  "empty array",
-			input: `[]`,
-			state: &JSONFormatterState{},
+			name:     "empty array",
+			input:    `[]`,
+			state:    &JSONFormatterState{},
 			expected: "[]",
 		},
 		{
-			name:  "empty object",
-			input: `{}`,
-			state: &JSONFormatterState{},
+			name:     "empty object",
+			input:    `{}`,
+			state:    &JSONFormatterState{},
 			expected: "{}",
 		},
 		{
-			name:  "string with nested chars",
-			input: `{"key": "value with { and [ and ,"}`,
-			state: &JSONFormatterState{},
+			name:     "string with nested chars",
+			input:    `{"key": "value with { and [ and ,"}`,
+			state:    &JSONFormatterState{},
 			expected: "{\n  \"key\": \"value with { and [ and ,\"\n}",
 		},
 		{
-			name:  "numbers and bools",
-			input: `{"a": 1, "b": true, "c": null}`,
-			state: &JSONFormatterState{},
+			name:     "numbers and bools",
+			input:    `{"a": 1, "b": true, "c": null}`,
+			state:    &JSONFormatterState{},
 			expected: "{\n  \"a\": 1,\n  \"b\": true,\n  \"c\": null\n}",
 		},
 		{
-			name:  "unquoted values",
-			input: `{"a": unquoted}`,
-			state: &JSONFormatterState{},
+			name:     "unquoted values",
+			input:    `{"a": unquoted}`,
+			state:    &JSONFormatterState{},
 			expected: "{\n  \"a\": unquoted\n}",
 		},
 	}
@@ -129,7 +126,7 @@ func TestFormatJSON(t *testing.T) {
 }
 
 func TestFormatJSON_DeepNesting(t *testing.T) {
-	// Test indentTable limit
+
 	depth := 65
 	input := strings.Repeat("[", depth) + strings.Repeat("]", depth)
 	result := formatJSON([]byte(input), &JSONFormatterState{})
@@ -142,12 +139,12 @@ func TestLoadPreviewFromFile(t *testing.T) {
 	tmp, _ := os.CreateTemp("", "preview")
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	
+
 	content := `{"a": 1}`
 	os.WriteFile(tmpPath, []byte(content), 0644)
-	
+
 	result, n, isJSON := loadPreviewFromFile(tmpPath, int64(len(content)), &JSONFormatterState{})
-	
+
 	if result != "{\n  \"a\": 1\n}" {
 		t.Errorf("expected formatted JSON, got %q", result)
 	}
@@ -159,11 +156,6 @@ func TestLoadPreviewFromFile(t *testing.T) {
 	}
 }
 
-// TestLoadPreviewFromFile_LargeJSONStaysFormatted guards the lifted
-// 1 MB cap: bodies above that used to flip isJSON=false and render as
-// raw bytes ("сплошной текст"). They must now come back pretty-printed
-// like small ones — the first jsonPreviewBatchSize is formatted and
-// further bytes load via loadMorePreview with continued state.
 func TestLoadPreviewFromFile_LargeJSONStaysFormatted(t *testing.T) {
 	tmp, _ := os.CreateTemp("", "preview-large")
 	tmpPath := tmp.Name()
@@ -171,7 +163,7 @@ func TestLoadPreviewFromFile_LargeJSONStaysFormatted(t *testing.T) {
 
 	var sb strings.Builder
 	sb.WriteString(`{"items":[`)
-	const itemCount = 60000 // ~1.4 MB minified, above the old 1 MB cap
+	const itemCount = 60000
 	for i := 0; i < itemCount; i++ {
 		if i > 0 {
 			sb.WriteByte(',')
@@ -196,10 +188,6 @@ func TestLoadPreviewFromFile_LargeJSONStaysFormatted(t *testing.T) {
 	}
 }
 
-// TestFormatJSON_StreamingPreservesStateAcrossBatches mirrors the
-// loadMorePreview path: split a JSON document at an arbitrary byte
-// (mid-string AND mid-number) and feed the halves to formatJSON with
-// shared state. Concatenated output must equal a single-shot format.
 func TestFormatJSON_StreamingPreservesStateAcrossBatches(t *testing.T) {
 	doc := []byte(`{"name":"hello world","count":1234567,"nested":{"a":1,"b":[1,2,3]}}`)
 	state := &JSONFormatterState{}
@@ -229,30 +217,29 @@ func TestLoadMorePreview(t *testing.T) {
 	tmp, _ := os.CreateTemp("", "preview")
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	
+
 	content := "line1\nline2\n"
 	os.WriteFile(tmpPath, []byte(content), 0644)
-	
+
 	tab := NewRequestTab("test")
 	tab.window = new(app.Window)
 	tab.respFile = tmpPath
 	tab.respSize = int64(len(content))
-	tab.previewLoaded = 6 // after "line1\n"
+	tab.previewLoaded = 6
 	tab.respIsJSON = false
-	
+
 	tab.loadMorePreview()
-	
-	// Wait and poll for channel
+
 	success := false
 	var lastText string
 	for i := 0; i < 200; i++ {
-		// Manual check of channel
+
 		select {
 		case text := <-tab.appendChan:
 			tab.RespEditor.Insert(text)
 		default:
 		}
-		
+
 		lastText = tab.RespEditor.Text()
 		if lastText == "line2\n" {
 			success = true
@@ -260,11 +247,10 @@ func TestLoadMorePreview(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	
+
 	if !success {
-		// Check if file is readable
+
 		data, _ := os.ReadFile(tmpPath)
 		t.Errorf("expected line2, got %q (respSize=%d, previewLoaded=%d, fileData=%q)", lastText, tab.respSize, tab.previewLoaded, string(data))
 	}
 }
-

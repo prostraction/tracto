@@ -47,23 +47,11 @@ type AppSettings struct {
 	StripJSONComments       bool    `json:"strip_json_comments"`
 	BracketPairColorization bool    `json:"bracket_pair_colorization"`
 
-	// SyntaxOverrides keyed by theme ID. Empty hex strings within an
-	// override mean "use the theme default for this token kind"; only
-	// non-empty entries actually replace a built-in color, so users can
-	// tweak just the few colors that bother them without committing to
-	// a full re-skin of the theme.
 	SyntaxOverrides map[string]ThemeSyntaxOverride `json:"syntax_overrides,omitempty"`
 
-	// ThemeOverrides keyed by theme ID. Same semantics as
-	// SyntaxOverrides but for the surrounding chrome palette
-	// (backgrounds, borders, accent, danger, etc.). Applied before
-	// SyntaxOverrides so the user can keep theme-derived defaults for
-	// the syntax block while re-skinning the chrome, or vice versa.
 	ThemeOverrides map[string]ThemeColorOverride `json:"theme_overrides,omitempty"`
 }
 
-// ThemeColorOverride mirrors palette's chrome fields as optional hex
-// strings. Empty fields fall through to the theme default.
 type ThemeColorOverride struct {
 	Bg           string `json:"bg,omitempty"`
 	BgDark       string `json:"bg_dark,omitempty"`
@@ -97,10 +85,6 @@ type ThemeColorOverride struct {
 	DividerLight string `json:"divider_light,omitempty"`
 }
 
-// ThemeSyntaxOverride lets the user override individual token colors
-// for a single theme. All fields are optional ("" = use theme default);
-// only the strings that successfully parse via parseHexColor are
-// applied at runtime.
 type ThemeSyntaxOverride struct {
 	Plain       string `json:"plain,omitempty"`
 	String      string `json:"string,omitempty"`
@@ -141,7 +125,7 @@ func defaultSettings() AppSettings {
 
 		JSONIndentSpaces:        2,
 		WrapLinesDefault:        false,
-		PreviewMaxMB:            15,
+		PreviewMaxMB:            100,
 		ResponseBodyPadding:     4,
 		DefaultSplitRatio:       0.5,
 		AutoFormatJSON:          true,
@@ -526,10 +510,6 @@ func applyPalette(p palette) {
 	colorDividerLight = p.DividerLight
 	colorSyntax = p.Syntax
 	if (colorSyntax.Plain == color.NRGBA{}) {
-		// Theme didn't ship a Syntax block (or only the default zero
-		// value made it through marshaling) — derive a coherent set
-		// from Bg/Fg/Accent so the response viewer always has colors
-		// to draw with.
 		colorSyntax = deriveSyntax(p)
 	}
 	applyMethodPalette(methodPaletteFor(p.Bg))
@@ -584,7 +564,7 @@ func (s AppSettings) sanitized() AppSettings {
 		s.JSONIndentSpaces = 8
 	}
 	if s.PreviewMaxMB < 1 {
-		s.PreviewMaxMB = 15
+		s.PreviewMaxMB = 100
 	}
 	if s.PreviewMaxMB > 500 {
 		s.PreviewMaxMB = 500
@@ -628,7 +608,7 @@ var (
 	currentUserAgent           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	currentDefaultHeaders      []DefaultHeader
 	currentJSONIndent          = 2
-	currentPreviewMaxMB        = 15
+	currentPreviewMaxMB        = 100
 	currentRespBodyPad         = unit.Dp(4)
 	currentDefaultMethod       = "GET"
 	currentDefaultSplitRatio   = float32(0.5)
@@ -658,7 +638,7 @@ func applyAppSettings(th *material.Theme, s AppSettings) {
 	}
 	currentPreviewMaxMB = s.PreviewMaxMB
 	if currentPreviewMaxMB < 1 {
-		currentPreviewMaxMB = 15
+		currentPreviewMaxMB = 100
 	}
 	currentRespBodyPad = unit.Dp(s.ResponseBodyPadding)
 	currentDefaultMethod = s.DefaultMethod
@@ -733,4 +713,3 @@ func buildHTTPClient(s AppSettings) *http.Client {
 	}
 	return c
 }
-

@@ -1,25 +1,5 @@
 package syntax
 
-// TokenizeYAML produces a token stream for YAML documents. The lexer
-// is line-oriented (YAML's grammar is too) and handles the common
-// cases the response viewer needs: keys before ':', scalars (plain or
-// quoted), list bullets '-', comments '# ...', anchors/aliases, and
-// document separators '---'/'...'.
-//
-// Categories:
-//   key:           → TokKey
-//   "value", 'value' → TokString
-//   42, 3.14, -1   → TokNumber
-//   true/false/yes/no/null/~ → TokBool / TokNull
-//   #comment       → TokComment
-//   - (list)       → TokPunctuation
-//   :              → TokPunctuation
-//   {} []          → TokBracket (flow-style; depth tracked)
-//   &anchor *alias → TokOperator
-//   ---, ...       → TokKeyword
-//
-// We don't track block-style indent for nesting depth — bracket pair
-// colorization only applies to flow-style {}/[].
 func TokenizeYAML(src []byte) []Token {
 	if len(src) == 0 {
 		return nil
@@ -39,20 +19,17 @@ func TokenizeYAML(src []byte) []Token {
 	for i < len(src) {
 		c := src[i]
 
-		// Line break — reset start-of-line state.
 		if c == '\n' {
 			i++
 			atLineStart = true
 			continue
 		}
 
-		// Indentation / inline whitespace — skipped.
 		if c == ' ' || c == '\t' || c == '\r' {
 			i++
 			continue
 		}
 
-		// Comments: '#' to end of line.
 		if c == '#' {
 			start := i
 			for i < len(src) && src[i] != '\n' {
@@ -62,7 +39,6 @@ func TokenizeYAML(src []byte) []Token {
 			continue
 		}
 
-		// Document separators '---' and '...' at line start.
 		if atLineStart && i+2 < len(src) {
 			if (src[i] == '-' && src[i+1] == '-' && src[i+2] == '-') ||
 				(src[i] == '.' && src[i+1] == '.' && src[i+2] == '.') {
@@ -72,9 +48,6 @@ func TokenizeYAML(src []byte) []Token {
 			}
 		}
 
-		// List bullet: '-' at line start (potentially with trailing
-		// space). Distinguish from negative numbers by requiring the
-		// next byte to be space/eol.
 		if atLineStart && c == '-' && (i+1 >= len(src) || src[i+1] == ' ' || src[i+1] == '\t' || src[i+1] == '\n') {
 			emit(i, i+1, TokPunctuation, 0)
 			i++
@@ -82,7 +55,6 @@ func TokenizeYAML(src []byte) []Token {
 			continue
 		}
 
-		// Flow-style brackets / braces.
 		if c == '{' || c == '[' {
 			emit(i, i+1, TokBracket, depth)
 			depth++
@@ -106,7 +78,6 @@ func TokenizeYAML(src []byte) []Token {
 			continue
 		}
 
-		// Anchor / alias.
 		if c == '&' || c == '*' {
 			start := i
 			i++
@@ -124,7 +95,6 @@ func TokenizeYAML(src []byte) []Token {
 			continue
 		}
 
-		// Tag handle '!tag'.
 		if c == '!' {
 			start := i
 			i++
@@ -140,7 +110,6 @@ func TokenizeYAML(src []byte) []Token {
 			continue
 		}
 
-		// Quoted scalar.
 		if c == '"' || c == '\'' {
 			start := i
 			quote := c
@@ -163,8 +132,6 @@ func TokenizeYAML(src []byte) []Token {
 			continue
 		}
 
-		// Plain scalar — read until ':' (followed by space/eol → key
-		// signal), '#' (comment), end of line, or flow-style break.
 		start := i
 		hadColon := false
 		colonAt := -1
@@ -183,7 +150,6 @@ func TokenizeYAML(src []byte) []Token {
 			}
 			i++
 		}
-		// Trim trailing whitespace from token range.
 		end := i
 		for end > start && (src[end-1] == ' ' || src[end-1] == '\t' || src[end-1] == '\r') {
 			end--
@@ -206,14 +172,10 @@ func TokenizeYAML(src []byte) []Token {
 	return out
 }
 
-// classifyYAMLScalar picks a TokenKind for a plain (unquoted) scalar.
-// Booleans, null and number forms get distinct kinds; everything else
-// is treated as a generic string.
 func classifyYAMLScalar(s []byte) TokenKind {
 	if len(s) == 0 {
 		return TokString
 	}
-	// Bool variants per YAML 1.1 / 1.2.
 	switch string(s) {
 	case "true", "True", "TRUE", "yes", "Yes", "YES", "on", "On", "ON":
 		return TokBool
@@ -222,7 +184,6 @@ func classifyYAMLScalar(s []byte) TokenKind {
 	case "null", "Null", "NULL", "~":
 		return TokNull
 	}
-	// Number — sign, then digits, dot, e/E, +/-.
 	i := 0
 	if s[i] == '-' || s[i] == '+' {
 		i++

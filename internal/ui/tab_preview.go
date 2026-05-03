@@ -12,8 +12,8 @@ import (
 	"tracto/internal/utils"
 )
 
-const previewBatchSize = 3 * 1024 * 1024
-const jsonPreviewBatchSize = 2 * 1024 * 1024
+const previewBatchSize = 100 * 1024 * 1024
+const jsonPreviewBatchSize = 100 * 1024 * 1024
 
 var previewBufPool = sync.Pool{
 	New: func() any {
@@ -73,14 +73,14 @@ func formatJSON(data []byte, state *JSONFormatterState) string {
 				}
 				i += idx
 			}
-			
+
 			if i > start {
 				out.Write(data[start:i])
 			}
-			
+
 			b := data[i]
 			i++
-			
+
 			if state.EscapeNext {
 				out.WriteByte(b)
 				state.EscapeNext = false
@@ -111,8 +111,7 @@ func formatJSON(data []byte, state *JSONFormatterState) string {
 				state.NeedIndent = false
 			}
 			out.WriteByte(b)
-			
-			// Lookahead to format empty arrays/objects on a single line
+
 			j := i
 			for j < len(data) && (data[j] == ' ' || data[j] == '\t' || data[j] == '\n' || data[j] == '\r') {
 				j++
@@ -197,14 +196,6 @@ func loadPreviewFromFile(path string, totalSize int64, state *JSONFormatterState
 	n, _ := io.ReadFull(f, data)
 	data = data[:n]
 
-	// Always use the streaming formatJSON. Previously json.Indent was
-	// taken when the whole body fit in a single batch — but it allocates
-	// the entire JSON DOM (~10× raw size for nested bodies) and then a
-	// second buffer for the indented output, then we read it as a string
-	// for the viewer. formatJSON is O(input) memory and produces
-	// identical output. It also keeps `state` correctly advanced for
-	// loadMorePreview, so partial-batch and full-batch loads share the
-	// same code path.
 	var result string
 	if isJSON {
 		result = formatJSON(data, state)
@@ -219,10 +210,6 @@ func (t *RequestTab) loadMorePreview() {
 	if t.respFile == "" || t.previewLoaded >= t.respSize {
 		return
 	}
-	// Single-flight: rapid clicks would otherwise spawn N goroutines that
-	// race on t.jsonFmtState (formatJSON mutates it) and produce out-of-
-	// order chunks. CompareAndSwap claims the slot; the goroutine releases
-	// it just before publishing its chunk so the next click can fire.
 	if !t.previewLoading.CompareAndSwap(false, true) {
 		return
 	}

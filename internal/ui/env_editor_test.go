@@ -33,19 +33,14 @@ func TestEnvEditor(t *testing.T) {
 		Now:         time.Now(),
 	}
 
-	// Exercise layout
 	ui.layoutEnvEditor(gtx)
 
-	// Test Add Variable
 	ui.EditingEnv.AddBtn.Click()
 	ui.layoutEnvEditor(gtx)
 	if len(ui.EditingEnv.Rows) != 2 {
 		t.Errorf("expected 2 rows after add, got %d", len(ui.EditingEnv.Rows))
 	}
 
-	// Test Save — should persist data WITHOUT closing the editor (that
-	// "save also closes" behaviour was removed; closing is the back
-	// button's job now).
 	ui.EditingEnv.NameEditor.SetText("Updated Env")
 	ui.EditingEnv.Rows[0].KeyEditor.SetText("newKey")
 	ui.EditingEnv.SaveBtn.Click()
@@ -61,16 +56,12 @@ func TestEnvEditor(t *testing.T) {
 		t.Errorf("expected var key to be updated")
 	}
 
-	// Test Delete (editor still open from previous save). After Add+Save
-	// the row list keeps its 2 drafty entries (the saved one + the empty
-	// added one); deleting the first should leave 1.
 	ui.EditingEnv.Rows[0].DelBtn.Click()
 	ui.layoutEnvEditor(gtx)
 	if len(ui.EditingEnv.Rows) != 1 {
 		t.Errorf("expected 1 row after delete, got %d", len(ui.EditingEnv.Rows))
 	}
 
-	// Test Back
 	ui.EditingEnv.BackBtn.Click()
 	ui.layoutEnvEditor(gtx)
 	if ui.EditingEnv != nil {
@@ -85,11 +76,11 @@ func TestEnvEditor_Discard(t *testing.T) {
 	ui.Environments = append(ui.Environments, &EnvironmentUI{Data: env})
 	ui.EditingEnv = ui.Environments[0]
 	ui.EditingEnv.initEditor()
-	
+
 	gtx := layout.Context{Ops: new(op.Ops)}
 	ui.EditingEnv.BackBtn.Click()
 	ui.layoutEnvEditor(gtx)
-	
+
 	if ui.EditingEnv != nil {
 		t.Errorf("expected editing mode closed")
 	}
@@ -110,7 +101,6 @@ func TestSaveVarPopup(t *testing.T) {
 		t.Errorf("var not saved to env")
 	}
 
-	// Update existing
 	ui.VarPopupEditor.SetText("newVal")
 	ui.saveVarPopup()
 	if env.Vars[0].Value != "newVal" {

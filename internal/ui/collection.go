@@ -27,10 +27,47 @@ type ExtRequest struct {
 	Method string      `json:"method"`
 	URL    interface{} `json:"url"`
 	Header interface{} `json:"header"`
-	Body   struct {
-		Mode string `json:"mode"`
-		Raw  string `json:"raw"`
-	} `json:"body"`
+	Body   ExtBody     `json:"body"`
+}
+
+type ExtBody struct {
+	Mode       string         `json:"mode,omitempty"`
+	Raw        string         `json:"raw,omitempty"`
+	URLEncoded []ExtKVPart    `json:"urlencoded,omitempty"`
+	FormData   []ExtFormPart  `json:"formdata,omitempty"`
+	File       *ExtBodyFile   `json:"file,omitempty"`
+	Disabled   bool           `json:"disabled,omitempty"`
+	Options    map[string]any `json:"options,omitempty"`
+}
+
+type ExtKVPart struct {
+	Key      string `json:"key"`
+	Value    string `json:"value"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+type ExtFormPart struct {
+	Key      string `json:"key"`
+	Value    string `json:"value,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Src      any    `json:"src,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+type ExtBodyFile struct {
+	Src     string `json:"src,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+type ParsedFormPart struct {
+	Key      string
+	Value    string
+	Kind     FormPartKind
+	FilePath string
+}
+
+type ParsedKV struct {
+	Key, Value string
 }
 
 type CollectionNode struct {
@@ -44,24 +81,23 @@ type CollectionNode struct {
 	Parent     *CollectionNode
 	Collection *ParsedCollection
 
+	Extras map[string]json.RawMessage
+
+	skippedItems []json.RawMessage
+
 	MenuBtn      widget.Clickable
 	MenuOpen     bool
 	MenuBtnWidth int
-	AddReqBtn widget.Clickable
-	AddFldBtn widget.Clickable
-	EditBtn   widget.Clickable
-	DupBtn    widget.Clickable
-	DelBtn    widget.Clickable
+	AddReqBtn    widget.Clickable
+	AddFldBtn    widget.Clickable
+	EditBtn      widget.Clickable
+	DupBtn       widget.Clickable
+	DelBtn       widget.Clickable
 
 	IsRenaming      bool
 	RenamingFocused bool
 	NameEditor      widget.Editor
 
-	// LastClickAt is the timestamp of the last sidebar click on this
-	// node. The render loop compares against gtx.Now and treats two
-	// clicks within 300 ms as a "double click", which switches the
-	// node into rename mode. We do this by hand because widget.Clickable
-	// only exposes single-click events.
 	LastClickAt time.Time
 }
 
@@ -69,18 +105,88 @@ type ParsedCollection struct {
 	ID   string
 	Name string
 	Root *CollectionNode
+
+	InfoExtras map[string]json.RawMessage
+
+	TopExtras map[string]json.RawMessage
 }
 
 type ParsedRequest struct {
-	Name    string
-	Method  string
-	URL     string
-	Body    string
-	Headers map[string]string
+	Name       string
+	Method     string
+	URL        string
+	Body       string
+	Headers    map[string]string
+	BodyType   BodyType
+	FormParts  []ParsedFormPart
+	URLEncoded []ParsedKV
+	BinaryPath string
+
+	// export so the structured slice survives the round-trip; the
+
+	RawURL json.RawMessage
+
+	RawHeaders json.RawMessage
+
+	Extras map[string]json.RawMessage
+
+	BodyExtras map[string]json.RawMessage
 }
 
 type CollectionUI struct {
 	Data *ParsedCollection
+}
+
+func isExampleItem(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return false
+	}
+	if _, ok := fields["originalRequest"]; ok {
+		return true
+	}
+	if _, ok := fields["_postman_previewlanguage"]; ok {
+		return true
+	}
+	if _, ok := fields["responseTime"]; ok {
+		return true
+	}
+	if v, ok := fields["_apidog_type"]; ok {
+		var s string
+		if json.Unmarshal(v, &s) == nil {
+			s = strings.ToLower(s)
+			if s == "example" || s == "case" || s == "apicase" {
+				return true
+			}
+		}
+	}
+
+	if _, hasCode := fields["code"]; hasCode {
+		if _, hasBody := fields["body"]; hasBody {
+			return true
+		}
+	}
+	return false
+}
+
+func formPartSrcPath(src any) string {
+	switch v := src.(type) {
+	case string:
+		return v
+	case []any:
+		for _, e := range v {
+			if s, ok := e.(string); ok && s != "" {
+				return s
+			}
+		}
+	case []string:
+		for _, s := range v {
+			if s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 func nodePathFrom(root *CollectionNode, target *CollectionNode) []int {
@@ -128,7 +234,6 @@ func nodeAtPath(root *CollectionNode, path []int) *CollectionNode {
 	return cur
 }
 
-
 func cloneNode(node *CollectionNode, parent *CollectionNode) *CollectionNode {
 	dup := &CollectionNode{
 		Name:       node.Name + " Copy",
@@ -142,14 +247,22 @@ func cloneNode(node *CollectionNode, parent *CollectionNode) *CollectionNode {
 
 	if node.Request != nil {
 		dup.Request = &ParsedRequest{
-			Name:   dup.Name,
-			Method: node.Request.Method,
-			URL:    node.Request.URL,
-			Body:   node.Request.Body,
+			Name:       dup.Name,
+			Method:     node.Request.Method,
+			URL:        node.Request.URL,
+			Body:       node.Request.Body,
+			BodyType:   node.Request.BodyType,
+			BinaryPath: node.Request.BinaryPath,
 		}
 		dup.Request.Headers = make(map[string]string)
 		for k, v := range node.Request.Headers {
 			dup.Request.Headers[k] = v
+		}
+		if len(node.Request.FormParts) > 0 {
+			dup.Request.FormParts = append([]ParsedFormPart(nil), node.Request.FormParts...)
+		}
+		if len(node.Request.URLEncoded) > 0 {
+			dup.Request.URLEncoded = append([]ParsedKV(nil), node.Request.URLEncoded...)
 		}
 	}
 
@@ -175,108 +288,261 @@ func ParseCollection(r io.Reader, id string) (*ParsedCollection, error) {
 		return nil, err
 	}
 
-	var ext ExtCollection
-	if err := json.Unmarshal(data, &ext); err != nil {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
 		return nil, err
 	}
-
-	if ext.Info.Name == "" && len(ext.Item) == 0 {
+	if len(top) == 0 {
 		return nil, io.ErrUnexpectedEOF
 	}
 
-	colName := utils.SanitizeText(ext.Info.Name)
-	if colName == "" {
-		colName = "Imported Collection"
+	col := &ParsedCollection{
+		ID:         id,
+		InfoExtras: map[string]json.RawMessage{},
+		TopExtras:  map[string]json.RawMessage{},
+	}
+
+	var rawItems []json.RawMessage
+	for k, v := range top {
+		switch k {
+		case "info":
+			var info map[string]json.RawMessage
+			if err := json.Unmarshal(v, &info); err == nil {
+				for ik, iv := range info {
+					if ik == "name" {
+						var s string
+						_ = json.Unmarshal(iv, &s)
+						col.Name = utils.SanitizeText(s)
+					} else {
+						col.InfoExtras[ik] = iv
+					}
+				}
+			} else {
+				col.TopExtras[k] = v
+			}
+		case "item":
+			_ = json.Unmarshal(v, &rawItems)
+		default:
+			col.TopExtras[k] = v
+		}
+	}
+
+	if col.Name == "" && len(rawItems) == 0 {
+		return nil, io.ErrUnexpectedEOF
+	}
+	if col.Name == "" {
+		col.Name = "Imported Collection"
 	}
 
 	root := &CollectionNode{
-		Name:     colName,
+		Name:     col.Name,
 		IsFolder: true,
 		Depth:    0,
 		Expanded: true,
 	}
 	root.NameEditor.SingleLine = true
 	root.NameEditor.Submit = true
-
-	var parseNode func(items []ExtItem, depth int) []*CollectionNode
-	parseNode = func(items []ExtItem, depth int) []*CollectionNode {
-		var nodes []*CollectionNode
-		for i := range items {
-			item := items[i]
-			node := &CollectionNode{
-				Name:  utils.SanitizeText(item.Name),
-				Depth: depth,
-			}
-			node.NameEditor.SingleLine = true
-			node.NameEditor.Submit = true
-
-			if len(item.Item) > 0 {
-				node.IsFolder = true
-				node.Children = parseNode(item.Item, depth+1)
-			} else if len(item.Request) > 0 && string(item.Request) != "null" {
-				var reqObj ExtRequest
-				var method string = "GET"
-				var url string
-				var reqBody string
-				headers := make(map[string]string)
-
-				if err := json.Unmarshal(item.Request, &reqObj); err == nil {
-					if reqObj.Method != "" {
-						method = utils.SanitizeText(reqObj.Method)
-					}
-					if reqObj.Body.Mode == "raw" {
-						reqBody = utils.SanitizeText(reqObj.Body.Raw)
-					}
-
-					switch u := reqObj.URL.(type) {
-					case string:
-						url = utils.SanitizeText(u)
-					case map[string]interface{}:
-						if raw, ok := u["raw"].(string); ok {
-							url = utils.SanitizeText(raw)
-						}
-					}
-
-					if headerList, ok := reqObj.Header.([]interface{}); ok {
-						for _, hObj := range headerList {
-							if hMap, ok := hObj.(map[string]interface{}); ok {
-								k, _ := hMap["key"].(string)
-								v, _ := hMap["value"].(string)
-								if k != "" {
-									headers[strings.TrimSpace(utils.SanitizeText(k))] = strings.TrimSpace(utils.SanitizeText(v))
-								}
-							}
-						}
-					}
-				} else {
-					var urlStr string
-					if err := json.Unmarshal(item.Request, &urlStr); err == nil {
-						url = utils.SanitizeText(urlStr)
-					}
-				}
-
-				node.Request = &ParsedRequest{
-					Name:    utils.SanitizeText(item.Name),
-					Method:  method,
-					URL:     url,
-					Body:    reqBody,
-					Headers: headers,
-				}
-			}
-			nodes = append(nodes, node)
+	for _, raw := range rawItems {
+		if isExampleItem(raw) {
+			root.skippedItems = append(root.skippedItems, raw)
+			continue
 		}
-		return nodes
+		if child := parseItemRaw(raw, 1); child != nil {
+			root.Children = append(root.Children, child)
+		}
 	}
-
-	root.Children = parseNode(ext.Item, 1)
-
-	col := &ParsedCollection{
-		ID:   id,
-		Name: colName,
-		Root: root,
-	}
-
+	col.Root = root
 	assignParents(root, nil, col)
-
 	return col, nil
+}
+
+func parseItemRaw(raw json.RawMessage, depth int) *CollectionNode {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil
+	}
+	node := &CollectionNode{Depth: depth, Extras: map[string]json.RawMessage{}}
+	node.NameEditor.SingleLine = true
+	node.NameEditor.Submit = true
+
+	requestPresent := false
+	if v, ok := fields["request"]; ok && len(v) > 0 && string(v) != "null" {
+		requestPresent = true
+	}
+	for k, v := range fields {
+		switch k {
+		case "name":
+			var s string
+			_ = json.Unmarshal(v, &s)
+			node.Name = utils.SanitizeText(s)
+		case "item":
+			if requestPresent {
+
+				node.Extras[k] = v
+				continue
+			}
+			var children []json.RawMessage
+			if err := json.Unmarshal(v, &children); err == nil {
+				node.IsFolder = true
+				for _, c := range children {
+					if isExampleItem(c) {
+						node.skippedItems = append(node.skippedItems, c)
+						continue
+					}
+					if child := parseItemRaw(c, depth+1); child != nil {
+						node.Children = append(node.Children, child)
+					}
+				}
+			}
+		case "request":
+			if len(v) > 0 && string(v) != "null" {
+				node.Request = parseRequestRaw(v, node.Name)
+			}
+		default:
+			node.Extras[k] = v
+		}
+	}
+	if node.Request == nil && !node.IsFolder && len(node.Children) == 0 {
+
+		node.IsFolder = true
+	}
+	return node
+}
+
+func parseRequestRaw(raw json.RawMessage, name string) *ParsedRequest {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+
+		var s string
+		if jerr := json.Unmarshal(raw, &s); jerr == nil && s != "" {
+			return &ParsedRequest{
+				Name:    name,
+				Method:  "GET",
+				URL:     utils.SanitizeText(s),
+				Headers: map[string]string{},
+				Extras:  map[string]json.RawMessage{},
+			}
+		}
+		return nil
+	}
+	req := &ParsedRequest{
+		Name:    name,
+		Method:  "GET",
+		Headers: map[string]string{},
+		Extras:  map[string]json.RawMessage{},
+	}
+	for k, v := range fields {
+		switch k {
+		case "method":
+			var s string
+			_ = json.Unmarshal(v, &s)
+			if s != "" {
+				req.Method = utils.SanitizeText(s)
+			}
+		case "url":
+			req.URL, req.RawURL = parseURL(v)
+		case "header":
+			req.Headers, req.RawHeaders = parseHeaderArray(v)
+		case "body":
+			parseBodyInto(v, req)
+		default:
+			req.Extras[k] = v
+		}
+	}
+	return req
+}
+
+func parseURL(raw json.RawMessage) (string, json.RawMessage) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return utils.SanitizeText(s), nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		var rs string
+		_ = json.Unmarshal(obj["raw"], &rs)
+		return utils.SanitizeText(rs), raw
+	}
+	return "", nil
+}
+
+func parseHeaderArray(raw json.RawMessage) (map[string]string, json.RawMessage) {
+	var arr []map[string]json.RawMessage
+	headers := map[string]string{}
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		for _, h := range arr {
+			var disabled bool
+			if d, ok := h["disabled"]; ok {
+				_ = json.Unmarshal(d, &disabled)
+			}
+			if disabled {
+				continue
+			}
+			var k, v string
+			_ = json.Unmarshal(h["key"], &k)
+			_ = json.Unmarshal(h["value"], &v)
+			if k = strings.TrimSpace(utils.SanitizeText(k)); k != "" {
+				headers[k] = strings.TrimSpace(utils.SanitizeText(v))
+			}
+		}
+	}
+	return headers, raw
+}
+
+func parseBodyInto(raw json.RawMessage, req *ParsedRequest) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return
+	}
+	req.BodyExtras = map[string]json.RawMessage{}
+	var modeStr string
+	for k, v := range fields {
+		switch k {
+		case "mode":
+			_ = json.Unmarshal(v, &modeStr)
+		case "raw":
+			var s string
+			_ = json.Unmarshal(v, &s)
+			req.Body = utils.SanitizeText(s)
+		case "urlencoded":
+			var arr []ExtKVPart
+			if err := json.Unmarshal(v, &arr); err == nil {
+				for _, kv := range arr {
+					if kv.Disabled {
+						continue
+					}
+					req.URLEncoded = append(req.URLEncoded, ParsedKV{
+						Key:   strings.TrimSpace(utils.SanitizeText(kv.Key)),
+						Value: utils.SanitizeText(kv.Value),
+					})
+				}
+			}
+		case "formdata":
+			var arr []ExtFormPart
+			if err := json.Unmarshal(v, &arr); err == nil {
+				for _, fp := range arr {
+					if fp.Disabled {
+						continue
+					}
+					part := ParsedFormPart{
+						Key:   strings.TrimSpace(utils.SanitizeText(fp.Key)),
+						Value: utils.SanitizeText(fp.Value),
+					}
+					if strings.EqualFold(fp.Type, "file") {
+						part.Kind = FormPartFile
+						part.FilePath = formPartSrcPath(fp.Src)
+					}
+					req.FormParts = append(req.FormParts, part)
+				}
+			}
+		case "file":
+			var f ExtBodyFile
+			if err := json.Unmarshal(v, &f); err == nil {
+				req.BinaryPath = utils.SanitizeText(f.Src)
+			}
+		default:
+			req.BodyExtras[k] = v
+		}
+	}
+	req.BodyType = BodyTypeFromMode(modeStr)
 }

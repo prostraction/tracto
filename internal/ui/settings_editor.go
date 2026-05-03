@@ -22,8 +22,8 @@ type SettingsEditorState struct {
 	Category    int
 	CategoryBtn []widget.Clickable
 
-	BackBtn    widget.Clickable
-	ResetBtn   widget.Clickable
+	BackBtn     widget.Clickable
+	ResetBtn    widget.Clickable
 	ContentList widget.List
 
 	ThemeBtns []widget.Clickable
@@ -57,44 +57,32 @@ type SettingsEditorState struct {
 	DefaultHdrEdit   widget.Editor
 	DefaultMethodBtn []widget.Clickable
 
-	JSONIndentDec     widget.Clickable
-	JSONIndentInc     widget.Clickable
-	PreviewMaxDec     widget.Clickable
-	PreviewMaxInc     widget.Clickable
+	JSONIndentDec           widget.Clickable
+	JSONIndentInc           widget.Clickable
+	PreviewMaxDec           widget.Clickable
+	PreviewMaxInc           widget.Clickable
 	WrapLines               widget.Bool
 	AutoFormatJSON          widget.Bool
 	StripJSONComments       widget.Bool
 	BracketPairColorization widget.Bool
 
-	// Per-theme syntax color overrides. Editors are indexed by
-	// tokenColorTable; SyntaxResetBtns are matched 1:1. The cached
-	// theme ID lets us detect when the user picked a different theme
-	// and re-populate the editors from that theme's defaults instead
-	// of carrying the previous theme's hex strings into the new view.
 	SyntaxOverrideEditors []widget.Editor
 	SyntaxResetBtns       []widget.Clickable
 	SyntaxSwatchBtns      []widget.Clickable
 	SyntaxResetAllBtn     widget.Clickable
 	syntaxEditorsThemeID  string
 
-	// Per-theme chrome color overrides. Mirrors the syntax slice trio;
-	// the same picker handles both via colorPickerState.kind.
-	ThemeColorEditors    []widget.Editor
-	ThemeColorResetBtns  []widget.Clickable
-	ThemeColorSwatchBtns []widget.Clickable
+	ThemeColorEditors     []widget.Editor
+	ThemeColorResetBtns   []widget.Clickable
+	ThemeColorSwatchBtns  []widget.Clickable
 	ThemeColorResetAllBtn widget.Clickable
-	themeEditorsThemeID  string
+	themeEditorsThemeID   string
 
-	// Collapsible blocks — both default to closed since the lists are
-	// long (29 chrome rows + 14 syntax rows) and rarely needed.
 	ThemeColorsExpanded   bool
 	SyntaxColorsExpanded  bool
 	ThemeColorsHeaderBtn  widget.Clickable
 	SyntaxColorsHeaderBtn widget.Clickable
 
-	// ColorPicker is the HSV picker overlay. kind == pickerNone means
-	// closed; one picker at a time, so a single state struct is enough
-	// — gestures and HSV reset on each open().
 	ColorPicker colorPickerState
 
 	initialized bool
@@ -224,12 +212,6 @@ func (ui *AppUI) closeSettings() {
 	}
 }
 
-// syncSyntaxEditors repopulates the override editors when the active
-// draft theme changes. We don't pre-fill with theme defaults — the
-// editor stays empty when no override is set, and a placeholder hint
-// shows the current effective hex below it. This way the editor's
-// content is exactly what the user has chosen to override; clearing it
-// drops back to the theme default without ambiguity.
 func (st *SettingsEditorState) syncSyntaxEditors() {
 	if st.syntaxEditorsThemeID == st.Draft.Theme {
 		return
@@ -241,10 +223,6 @@ func (st *SettingsEditorState) syncSyntaxEditors() {
 	}
 }
 
-// putOverride writes h into the active theme's override slot at i,
-// creating the SyntaxOverrides map / theme entry on demand and
-// removing them when the resulting override is fully empty (so we
-// don't persist empty objects to state.json).
 func (st *SettingsEditorState) putOverride(i int, h string) {
 	themeID := st.Draft.Theme
 	ov := st.Draft.SyntaxOverrides[themeID]
@@ -264,9 +242,6 @@ func (st *SettingsEditorState) putOverride(i int, h string) {
 	st.Draft.SyntaxOverrides[themeID] = ov
 }
 
-// syncThemeEditors mirrors syncSyntaxEditors but for the chrome
-// override block. Triggered after a theme switch so the row UI shows
-// the new theme's overrides instead of the old theme's hex values.
 func (st *SettingsEditorState) syncThemeEditors() {
 	if st.themeEditorsThemeID == st.Draft.Theme {
 		return
@@ -278,7 +253,6 @@ func (st *SettingsEditorState) syncThemeEditors() {
 	}
 }
 
-// putThemeOverride is the chrome-color counterpart to putOverride.
 func (st *SettingsEditorState) putThemeOverride(i int, h string) {
 	themeID := st.Draft.Theme
 	ov := st.Draft.ThemeOverrides[themeID]
@@ -349,20 +323,11 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 			tid := themeRegistry[i].ID
 			if st.Draft.Theme != tid {
 				st.Draft.Theme = tid
-				// Close the picker — its HSV would otherwise reflect
-				// the *previous* theme's color and the next drag
-				// would write that color as an override on the new
-				// theme.
 				st.ColorPicker.closePicker()
 				changed = true
 			}
 		}
 	}
-	// Refresh override editor text right after the theme switch so the
-	// row UI reflects the new theme's overrides — running this *before*
-	// the editor-update loop also prevents an editor's stale Dark+ hex
-	// from being interpreted as the new theme's first edit (SetText
-	// doesn't fire ChangeEvent, so it's a one-way refresh).
 	st.syncSyntaxEditors()
 
 	for st.UISizeDec.Clicked(gtx) {
@@ -532,10 +497,6 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 		}
 	}
 
-	// Syntax override editors: each text change writes into the draft's
-	// SyntaxOverrides[currentTheme]; invalid hex is stored as-is but
-	// applySyntaxOverride filters at apply time, so an in-progress
-	// "#1F2" stays parked until the user finishes typing.
 	for i := range st.SyntaxOverrideEditors {
 		ed := &st.SyntaxOverrideEditors[i]
 		for {
@@ -562,10 +523,6 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 			changed = true
 		}
 	}
-	// Swatch click — toggles the picker overlay for this row. anchor
-	// is the pointer position at click time (window coords); the
-	// app-level overlay reads this to render the picker as a deferred
-	// popup near the cursor, just like the method dropdown.
 	for i := range st.SyntaxSwatchBtns {
 		for st.SyntaxSwatchBtns[i].Clicked(gtx) {
 			if st.ColorPicker.kind == pickerSyntax && st.ColorPicker.openIdx == i {
@@ -580,10 +537,6 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 			changed = true
 		}
 	}
-	// While the picker is open, push HSV → editor + override every
-	// frame the values changed since last frame. lastHSV is seeded by
-	// open() to the just-set HSV so the first frame doesn't snapshot a
-	// "change" and convert "merely opened" into an explicit override.
 	if st.ColorPicker.isOpen() {
 		cur := [3]float32{st.ColorPicker.h, st.ColorPicker.s, st.ColorPicker.v}
 		if cur != st.ColorPicker.lastHSV {
@@ -607,9 +560,6 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 		st.ColorPicker.closePicker()
 		changed = true
 	}
-	// Theme color editors / reset buttons / swatch clicks. Same flow
-	// as the syntax block, parameterised on tokenColorTable vs
-	// paletteColorTable.
 	st.syncThemeEditors()
 	for i := range st.ThemeColorEditors {
 		ed := &st.ThemeColorEditors[i]
@@ -663,7 +613,6 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 		}
 		changed = true
 	}
-	// Spoiler toggles.
 	for st.ThemeColorsHeaderBtn.Clicked(gtx) {
 		st.ThemeColorsExpanded = !st.ThemeColorsExpanded
 	}
@@ -775,9 +724,6 @@ func connsStep(current int) int {
 }
 
 func methodGrid(th *material.Theme, st *SettingsEditorState, gtx layout.Context) layout.Dimensions {
-	// Each method tile is Flexed(1) so the seven buttons evenly partition
-	// the row's full width — a click in any horizontal pixel lands on the
-	// nearest method, no dead gap between tiles.
 	height := gtx.Dp(unit.Dp(28))
 	gap := gtx.Dp(unit.Dp(2))
 	children := make([]layout.FlexChild, 0, len(methods)*2)
@@ -997,10 +943,6 @@ func (ui *AppUI) sectionsAppearance() []layout.Widget {
 	return widgets
 }
 
-// spoilerHeader renders a collapsible section title: the title is a
-// Clickable that toggles expanded state (▶ / ▼ chevron), and the
-// "Reset all" button hangs off the right edge so it doesn't toggle the
-// section open/close when clicked.
 func spoilerHeader(th *material.Theme, headerBtn, resetBtn *widget.Clickable, title string, expanded bool) layout.Widget {
 	return func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
@@ -1042,9 +984,6 @@ func spoilerHeader(th *material.Theme, headerBtn, resetBtn *widget.Clickable, ti
 	}
 }
 
-// themeColorRow is the chrome counterpart to syntaxColorRow. Same
-// shape (swatch + label + hex editor + reset ×); it just hits the
-// paletteColorTable + ThemeOverrides instead of the syntax slice.
 func themeColorRow(th *material.Theme, st *SettingsEditorState, idx int) layout.Widget {
 	entry := paletteColorTable[idx]
 	return func(gtx layout.Context) layout.Dimensions {
@@ -1107,13 +1046,9 @@ func themeColorRow(th *material.Theme, st *SettingsEditorState, idx int) layout.
 	}
 }
 
-// syntaxColorRow renders one token color editor: a swatch showing the
-// effective color, the token's label, the hex editor, and a × button
-// that clears the override for this token alone.
 func syntaxColorRow(th *material.Theme, st *SettingsEditorState, idx int) layout.Widget {
 	entry := tokenColorTable[idx]
 	return func(gtx layout.Context) layout.Dimensions {
-		// Effective color: theme default with override applied (if any).
 		basePalette := paletteFor(st.Draft.Theme).Syntax
 		if ov, ok := st.Draft.SyntaxOverrides[st.Draft.Theme]; ok {
 			basePalette = applySyntaxOverride(basePalette, ov)

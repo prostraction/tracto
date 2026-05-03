@@ -11,10 +11,6 @@ import (
 	"github.com/nanorele/gio/widget/material"
 )
 
-// commitEditingEnv flushes the in-progress env editor draft (name +
-// rows) back into the underlying ParsedEnvironment and persists it.
-// Used by the explicit Save button and by the click-outside dismiss
-// path in layoutContent so both routes save the same way.
 func (ui *AppUI) commitEditingEnv() {
 	env := ui.EditingEnv
 	if env == nil || env.Data == nil {

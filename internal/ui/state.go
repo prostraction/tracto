@@ -9,7 +9,42 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
+
+func atomicWriteFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := f.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			os.Remove(tmpPath)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
 
 type HeaderState struct {
 	Key   string `json:"key"`
@@ -17,16 +52,27 @@ type HeaderState struct {
 }
 
 type TabState struct {
-	Title            string        `json:"title"`
-	Method           string        `json:"method"`
-	URL              string        `json:"url"`
-	Body             string        `json:"body"`
-	Headers          []HeaderState `json:"headers"`
-	SplitRatio       float32       `json:"split_ratio"`
-	HeaderSplitRatio float32       `json:"header_split_ratio,omitempty"`
-	ReqWrapEnabled   *bool         `json:"req_wrap_enabled,omitempty"`
-	CollectionID     string        `json:"collection_id,omitempty"`
-	NodePath         []int         `json:"node_path,omitempty"`
+	Title            string          `json:"title"`
+	Method           string          `json:"method"`
+	URL              string          `json:"url"`
+	Body             string          `json:"body"`
+	Headers          []HeaderState   `json:"headers"`
+	SplitRatio       float32         `json:"split_ratio"`
+	HeaderSplitRatio float32         `json:"header_split_ratio,omitempty"`
+	ReqWrapEnabled   *bool           `json:"req_wrap_enabled,omitempty"`
+	CollectionID     string          `json:"collection_id,omitempty"`
+	NodePath         []int           `json:"node_path,omitempty"`
+	BodyType         string          `json:"body_type,omitempty"`
+	FormParts        []FormPartState `json:"form_parts,omitempty"`
+	URLEncoded       []HeaderState   `json:"url_encoded,omitempty"`
+	BinaryPath       string          `json:"binary_path,omitempty"`
+}
+
+type FormPartState struct {
+	Key      string `json:"key"`
+	Kind     string `json:"kind"`
+	Value    string `json:"value,omitempty"`
+	FilePath string `json:"file_path,omitempty"`
 }
 
 type AppState struct {
@@ -80,24 +126,21 @@ func loadState() AppState {
 	return state
 }
 
-// loadStateWithRaw returns both the decoded state and the raw bytes
-// read from state.json. Callers that need to detect legacy fields for
-// migration (e.g. to trigger a rewrite that drops a removed setting)
-// use the raw bytes — json.Unmarshal silently ignores unknown fields,
-// so the decoded struct alone can't reveal whether the file had stale
-// entries. An empty byte slice means the file didn't exist.
 func loadStateWithRaw() (AppState, []byte) {
 	var state AppState
 	data, err := os.ReadFile(getStateFile())
 	if err != nil {
 		return state, nil
 	}
-	json.Unmarshal(data, &state)
-	// Backfill defaults for bool/numeric fields added after the on-disk
-	// state.json was first written. JSON Unmarshal silently uses Go's
-	// zero value for absent keys, but several new settings semantically
-	// default to "on" rather than "off" — without this the upgrade flow
-	// would silently flip Keep-Alive, JSON formatting, etc. off.
+	if len(bytes.TrimSpace(data)) == 0 {
+		return state, data
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		backup := getStateFile() + ".broken-" + time.Now().Format("20060102-150405")
+		os.Rename(getStateFile(), backup)
+		return AppState{}, nil
+	}
+
 	if state.Settings != nil {
 		if !bytes.Contains(data, []byte(`"keep_alive"`)) {
 			state.Settings.KeepAlive = true
@@ -121,14 +164,13 @@ func loadStateWithRaw() (AppState, []byte) {
 	return state, data
 }
 
-
 func saveCollectionRaw(data []byte) (string, error) {
 	bytes := make([]byte, 16)
 	rand.Read(bytes)
 	id := hex.EncodeToString(bytes)
 
 	path := filepath.Join(getCollectionsDir(), id+".json")
-	err := os.WriteFile(path, data, 0644)
+	err := atomicWriteFile(path, data)
 	return id, err
 }
 
@@ -163,7 +205,7 @@ func saveEnvironmentRaw(data []byte) (string, error) {
 	id := hex.EncodeToString(bytes)
 
 	path := filepath.Join(getEnvironmentsDir(), id+".json")
-	err := os.WriteFile(path, data, 0644)
+	err := atomicWriteFile(path, data)
 	return id, err
 }
 
@@ -187,7 +229,7 @@ func SaveEnvironment(env *ParsedEnvironment) error {
 		return err
 	}
 	path := filepath.Join(getEnvironmentsDir(), env.ID+".json")
-	return os.WriteFile(path, data, 0644)
+	return atomicWriteFile(path, data)
 }
 
 func loadSavedEnvironments() []*ParsedEnvironment {
@@ -223,9 +265,40 @@ func buildExtItems(nodes []*CollectionNode) []ExtItem {
 			item.Item = buildExtItems(n.Children)
 		} else if n.Request != nil {
 			req := ExtRequest{Method: n.Request.Method, URL: n.Request.URL}
-			if n.Request.Body != "" {
-				req.Body.Mode = "raw"
-				req.Body.Raw = n.Request.Body
+			req.Body.Mode = n.Request.BodyType.PostmanMode()
+			switch n.Request.BodyType {
+			case BodyRaw:
+				if n.Request.Body != "" {
+					req.Body.Raw = n.Request.Body
+				}
+			case BodyURLEncoded:
+				for _, kv := range n.Request.URLEncoded {
+					if kv.Key == "" {
+						continue
+					}
+					req.Body.URLEncoded = append(req.Body.URLEncoded, ExtKVPart{
+						Key: kv.Key, Value: kv.Value,
+					})
+				}
+			case BodyFormData:
+				for _, fp := range n.Request.FormParts {
+					if fp.Key == "" {
+						continue
+					}
+					part := ExtFormPart{Key: fp.Key, Type: "text", Value: fp.Value}
+					if fp.Kind == FormPartFile {
+						part.Type = "file"
+						part.Value = ""
+						if fp.FilePath != "" {
+							part.Src = fp.FilePath
+						}
+					}
+					req.Body.FormData = append(req.Body.FormData, part)
+				}
+			case BodyBinary:
+				if n.Request.BinaryPath != "" {
+					req.Body.File = &ExtBodyFile{Src: n.Request.BinaryPath}
+				}
 			}
 			if len(n.Request.Headers) > 0 {
 				keys := make([]string, 0, len(n.Request.Headers))
@@ -247,32 +320,159 @@ func buildExtItems(nodes []*CollectionNode) []ExtItem {
 	return items
 }
 
-func snapshotCollection(col *ParsedCollection) (string, *ExtCollection) {
+func marshalCollection(col *ParsedCollection) []byte {
+	info := map[string]any{}
+	for k, v := range col.InfoExtras {
+		info[k] = v
+	}
+	info["name"] = col.Name
+
+	items := make([]any, 0, len(col.Root.Children)+len(col.Root.skippedItems))
+	for _, child := range col.Root.Children {
+		items = append(items, marshalNode(child))
+	}
+
+	for _, raw := range col.Root.skippedItems {
+		items = append(items, raw)
+	}
+
+	out := map[string]any{}
+	for k, v := range col.TopExtras {
+		out[k] = v
+	}
+	out["info"] = info
+	out["item"] = items
+
+	data, _ := json.MarshalIndent(out, "", "  ")
+	return data
+}
+
+func marshalNode(node *CollectionNode) map[string]any {
+	out := map[string]any{}
+	for k, v := range node.Extras {
+		out[k] = v
+	}
+	out["name"] = node.Name
+	if node.IsFolder {
+		children := make([]any, 0, len(node.Children)+len(node.skippedItems))
+		for _, c := range node.Children {
+			children = append(children, marshalNode(c))
+		}
+
+		for _, raw := range node.skippedItems {
+			children = append(children, raw)
+		}
+		out["item"] = children
+	} else if node.Request != nil {
+		out["request"] = marshalRequest(node.Request)
+	}
+	return out
+}
+
+func marshalRequest(req *ParsedRequest) map[string]any {
+	out := map[string]any{}
+	for k, v := range req.Extras {
+		out[k] = v
+	}
+	out["method"] = req.Method
+
+	if len(req.RawURL) > 0 {
+		var urlObj map[string]any
+		if err := json.Unmarshal(req.RawURL, &urlObj); err == nil {
+			urlObj["raw"] = req.URL
+			out["url"] = urlObj
+		} else {
+			out["url"] = req.URL
+		}
+	} else {
+		out["url"] = req.URL
+	}
+
+	out["header"] = marshalRequestHeaders(req)
+	out["body"] = marshalRequestBody(req)
+	return out
+}
+
+func marshalRequestHeaders(req *ParsedRequest) []any {
+	if len(req.Headers) == 0 {
+		return []any{}
+	}
+	keys := make([]string, 0, len(req.Headers))
+	for k := range req.Headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]any, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, map[string]any{"key": k, "value": req.Headers[k]})
+	}
+	return out
+}
+
+func marshalRequestBody(req *ParsedRequest) map[string]any {
+	out := map[string]any{}
+	for k, v := range req.BodyExtras {
+		out[k] = v
+	}
+	out["mode"] = req.BodyType.PostmanMode()
+	switch req.BodyType {
+	case BodyRaw:
+		if req.Body != "" {
+			out["raw"] = req.Body
+		}
+	case BodyURLEncoded:
+		arr := make([]any, 0, len(req.URLEncoded))
+		for _, kv := range req.URLEncoded {
+			if kv.Key == "" {
+				continue
+			}
+			arr = append(arr, map[string]any{"key": kv.Key, "value": kv.Value})
+		}
+		out["urlencoded"] = arr
+	case BodyFormData:
+		arr := make([]any, 0, len(req.FormParts))
+		for _, fp := range req.FormParts {
+			if fp.Key == "" {
+				continue
+			}
+			row := map[string]any{"key": fp.Key, "type": "text", "value": fp.Value}
+			if fp.Kind == FormPartFile {
+				row["type"] = "file"
+				delete(row, "value")
+				if fp.FilePath != "" {
+					row["src"] = fp.FilePath
+				}
+			}
+			arr = append(arr, row)
+		}
+		out["formdata"] = arr
+	case BodyBinary:
+		if req.BinaryPath != "" {
+			out["file"] = map[string]any{"src": req.BinaryPath}
+		}
+	}
+	return out
+}
+
+func snapshotCollection(col *ParsedCollection) (string, []byte) {
 	if col == nil || col.Root == nil || col.ID == "" {
 		return "", nil
 	}
-	ext := &ExtCollection{}
-	ext.Info.Name = col.Name
-	ext.Item = buildExtItems(col.Root.Children)
-	return col.ID, ext
+	return col.ID, marshalCollection(col)
 }
 
-func writeCollectionFile(id string, ext *ExtCollection) error {
-	if id == "" || ext == nil {
+func writeCollectionFile(id string, data []byte) error {
+	if id == "" || len(data) == 0 {
 		return nil
 	}
-	data, err := json.MarshalIndent(ext, "", "  ")
-	if err != nil {
-		return err
-	}
 	path := filepath.Join(getCollectionsDir(), id+".json")
-	return os.WriteFile(path, data, 0644)
+	return atomicWriteFile(path, data)
 }
 
 func SaveCollectionToFile(col *ParsedCollection) error {
-	id, ext := snapshotCollection(col)
-	if ext == nil {
+	id, data := snapshotCollection(col)
+	if len(data) == 0 {
 		return nil
 	}
-	return writeCollectionFile(id, ext)
+	return writeCollectionFile(id, data)
 }

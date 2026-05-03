@@ -47,9 +47,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 	}
 	bgClip.Pop()
 
-	// Vertical divider drag (only has effect when the divider is rendered,
-	// i.e. both sections expanded; otherwise no Add() registers a target and
-	// Update returns no events).
 	var moved bool
 	var finalY float32
 	var released bool
@@ -87,9 +84,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 		ui.Window.Invalidate()
 	}
 	if released {
-		// Snap envs section height to a whole number of rows so the
-		// last visible env is never half-cut. We avoid snapping during
-		// drag (which felt jittery) — only on release.
 		if ui.envRowH > 0 {
 			snapped := ((ui.SidebarEnvHeight + ui.envRowH/2) / ui.envRowH) * ui.envRowH
 			minEnvHeight := gtx.Dp(unit.Dp(80))
@@ -136,10 +130,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 			ui.addNewCollection()
 		}
 
-		// The expand/collapse Clickable wraps only the arrow + label
-		// (Flexed=1 area). The Add/Import buttons are rendered as
-		// siblings outside that Clickable so pressing them does not
-		// also toggle the section.
 		return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(0), Right: unit.Dp(0)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -364,9 +354,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 				if node.IsRenaming {
 					continue
 				}
-				// Double-click within 300 ms switches the node into
-				// rename mode. Compared against gtx.Now since
-				// widget.Clickable only surfaces single-click events.
 				if !node.LastClickAt.IsZero() && gtx.Now.Sub(node.LastClickAt) < 300*time.Millisecond {
 					node.IsRenaming = true
 					node.NameEditor.SetText(node.Name)
@@ -411,9 +398,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 									}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 										children := make([]layout.FlexChild, 0, 3)
 										if node.IsFolder {
-											// Folder chevron rendered as a material icon
-											// (matches the section headers and stays a
-											// consistent size regardless of font fallback).
 											children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 												ic := iconChevronR
 												if node.Expanded {
@@ -427,15 +411,7 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 											children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout))
 											children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 												if node.IsRenaming {
-													// Plain material.Editor so the rename widget
-													// matches the non-rename label's typeface
-													// (theme default) instead of being forced to
-													// JetBrains Mono by TextField. Collection
-													// names are exempted from the "JBM for all
-													// input fields" rule per the user's spec.
-													ed := material.Editor(ui.Theme, &node.NameEditor, "")
-													ed.TextSize = unit.Sp(12)
-													return ed.Layout(gtx)
+													return InlineRenameField(gtx, ui.Theme, &node.NameEditor)
 												}
 												lbl := material.Label(ui.Theme, unit.Sp(12), node.Name)
 												lbl.Alignment = text.Start
@@ -453,15 +429,7 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 											children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout))
 											children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 												if node.IsRenaming {
-													// Plain material.Editor so the rename widget
-													// matches the non-rename label's typeface
-													// (theme default) instead of being forced to
-													// JetBrains Mono by TextField. Collection
-													// names are exempted from the "JBM for all
-													// input fields" rule per the user's spec.
-													ed := material.Editor(ui.Theme, &node.NameEditor, "")
-													ed.TextSize = unit.Sp(12)
-													return ed.Layout(gtx)
+													return InlineRenameField(gtx, ui.Theme, &node.NameEditor)
 												}
 												lbl := material.Label(ui.Theme, unit.Sp(12), node.Name)
 												lbl.Alignment = text.Start
@@ -643,11 +611,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 			})
 		}
 
-		// Snapshot the slice up front. material.List passes len(envs) to
-		// the underlying layout.List, which may keep iterating callbacks
-		// with stale indices if a callback shrinks the slice mid-frame
-		// (e.g. via DelBtn). We defer the actual removal until after
-		// rendering finishes; the snapshot keeps indices valid.
 		envSnapshot := ui.Environments
 		var envToDelete *EnvironmentUI
 		dim := material.List(ui.Theme, &ui.EnvList).Layout(gtx, len(envSnapshot), func(gtx layout.Context, idx int) layout.Dimensions {
@@ -672,8 +635,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 					e.RenamingFocused = false
 				}
 
-				// SelectBtn click: set/unset active env (no rename
-				// shortcut here).
 				for env.SelectBtn.Clicked(gtx) {
 					if isActive {
 						ui.ActiveEnvID = ""
@@ -684,8 +645,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 					ui.saveState()
 					ui.Window.Invalidate()
 				}
-				// Click on the row: double-click → inline rename;
-				// single click → activate env.
 				for env.Click.Clicked(gtx) {
 					if env.IsRenaming {
 						continue
@@ -709,7 +668,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 					ui.Window.Invalidate()
 				}
 
-				// While renaming, watch for Submit (Enter) and Esc.
 				if env.IsRenaming {
 					for {
 						ev, ok := env.InlineNameEd.Update(gtx)
@@ -777,9 +735,7 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 									return layout.Inset{Left: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 										if env.IsRenaming {
-											ed := material.Editor(ui.Theme, &env.InlineNameEd, "")
-											ed.TextSize = unit.Sp(12)
-											return ed.Layout(gtx)
+											return InlineRenameField(gtx, ui.Theme, &env.InlineNameEd)
 										}
 										lbl := material.Label(ui.Theme, unit.Sp(12), env.Data.Name)
 										lbl.MaxLines = 1
@@ -864,11 +820,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 			lineCol = colorAccent
 		}
 		vis := gtx.Dp(unit.Dp(1))
-		// Pin the visible line to the bottom edge of the hit area so it
-		// sits flush against the Environments header. Otherwise the
-		// 3dp gap that the centered line leaves between itself and the
-		// header reads as asymmetric "padding above" the header (the
-		// matching borderLine below the header is only 1dp).
 		lineY := hit - vis
 		paint.FillShape(gtx.Ops, lineCol, clip.Rect{Min: image.Pt(0, lineY), Max: image.Pt(size.X, lineY+vis)}.Op())
 
@@ -892,9 +843,6 @@ func (ui *AppUI) layoutSidebar(gtx layout.Context) layout.Dimensions {
 
 	switch {
 	case ui.ColsExpanded && ui.EnvsExpanded:
-		// Weights derived from SidebarEnvHeight. Flex normalizes them back to
-		// pixels proportionally; since the drag handler updates SidebarEnvHeight
-		// each frame, this stays coherent.
 		remaining := gtx.Constraints.Max.Y - gtx.Dp(unit.Dp(62))
 		if remaining < 2 {
 			remaining = 2

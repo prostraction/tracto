@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"testing"
 	"github.com/nanorele/gio/widget"
+	"testing"
 )
 
 func TestProcessTemplate(t *testing.T) {
@@ -53,15 +53,12 @@ func TestGetCleanTitle(t *testing.T) {
 
 	for _, tc := range tests {
 		tab.Title = tc.title
-		tab.cleanTitleSrc = "" // force cache invalidation
+		tab.cleanTitleSrc = ""
 		result := tab.getCleanTitle()
 		if result != tc.expected {
 			t.Errorf("expected %q, got %q", tc.expected, result)
 		}
-		
-		// Test cache: cleanTitleSrc matches Title, so it should use cached value.
-		// If we mess with cleanTitle manually, it should return our messed up value
-		// because it's reading from the cache.
+
 		tab.cleanTitle = "Cached"
 		resultCached := tab.getCleanTitle()
 		if resultCached != "Cached" {
@@ -93,61 +90,54 @@ func TestCheckDirtyAndSaveToCollection(t *testing.T) {
 	}
 	tab.URLInput.SetText("http://test.com")
 	tab.ReqEditor.SetText("body")
-	
+
 	h1Key := widget.Editor{}
 	h1Key.SetText("Header1")
 	h1Val := widget.Editor{}
 	h1Val.SetText("Value1")
-	
+
 	tab.Headers = []*HeaderItem{
 		{Key: h1Key, Value: h1Val, IsGenerated: false},
 	}
 
-	// Should not be dirty
 	tab.checkDirty()
 	if tab.IsDirty {
 		t.Errorf("expected tab to not be dirty")
 	}
 
-	// Change URL -> Dirty
 	tab.URLInput.SetText("http://changed.com")
 	tab.checkDirty()
 	if !tab.IsDirty {
 		t.Errorf("expected tab to be dirty after URL change")
 	}
-	
-	// Reset URL
+
 	tab.URLInput.SetText("http://test.com")
 	tab.checkDirty()
 	if tab.IsDirty {
 		t.Errorf("expected tab to not be dirty after reset")
 	}
-	
-	// Change Body -> Dirty
+
 	tab.ReqEditor.SetText("changed body")
 	tab.checkDirty()
 	if !tab.IsDirty {
 		t.Errorf("expected tab to be dirty after body change")
 	}
 	tab.ReqEditor.SetText("body")
-	
-	// Change Title -> Currently NOT dirty in this app's logic
+
 	tab.Title = "Changed Title"
 	tab.checkDirty()
 	if tab.IsDirty {
 		t.Errorf("expected tab to still not be dirty after title change")
 	}
 	tab.Title = "TestReq"
-	
-	// Change Header -> Dirty
+
 	tab.Headers[0].Value.SetText("Changed Value")
 	tab.checkDirty()
 	if !tab.IsDirty {
 		t.Errorf("expected tab to be dirty after header value change")
 	}
 	tab.Headers[0].Value.SetText("Value1")
-	
-	// Add Header -> Dirty
+
 	h2Key := widget.Editor{}
 	h2Key.SetText("H2")
 	tab.Headers = append(tab.Headers, &HeaderItem{Key: h2Key})
@@ -157,7 +147,6 @@ func TestCheckDirtyAndSaveToCollection(t *testing.T) {
 	}
 	tab.Headers = tab.Headers[:1]
 
-	// Save
 	tab.URLInput.SetText("http://changed.com")
 	savedCol := tab.saveToCollection()
 	if savedCol != col {
@@ -169,8 +158,7 @@ func TestCheckDirtyAndSaveToCollection(t *testing.T) {
 	if tab.IsDirty {
 		t.Errorf("expected tab to not be dirty after save")
 	}
-	
-	// Check unlinked
+
 	unlinkedTab := &RequestTab{}
 	unlinkedTab.checkDirty()
 	if unlinkedTab.IsDirty {
@@ -184,21 +172,18 @@ func TestCheckDirtyAndSaveToCollection(t *testing.T) {
 func TestSearch(t *testing.T) {
 	tab := NewRequestTab("test")
 	tab.RespEditor.SetText("Hello world! This is a test. Hello again!")
-	
-	// Test invalidate
+
 	tab.invalidateSearchCache()
 	if !tab.searchCacheDirty {
 		t.Errorf("expected searchCacheDirty to be true")
 	}
-	
-	// Test empty search
+
 	tab.SearchEditor.SetText("")
 	tab.performSearch()
 	if len(tab.searchResults) != 0 {
 		t.Errorf("expected empty results for empty search")
 	}
-	
-	// Test performSearch
+
 	tab.SearchEditor.SetText("hello")
 	tab.performSearch()
 	if tab.searchCacheDirty {
@@ -210,27 +195,23 @@ func TestSearch(t *testing.T) {
 	if tab.searchResults[0] != 0 || tab.searchResults[1] != 29 {
 		t.Errorf("unexpected search results: %v", tab.searchResults)
 	}
-	
-	// Test searchNavigate next
+
 	tab.searchCurrent = 0
 	tab.searchNavigate(1)
 	if tab.searchCurrent != 1 {
 		t.Errorf("expected current to be 1, got %d", tab.searchCurrent)
 	}
-	
-	// Test searchNavigate next wrapping
+
 	tab.searchNavigate(1)
 	if tab.searchCurrent != 0 {
 		t.Errorf("expected current to wrap to 0, got %d", tab.searchCurrent)
 	}
-	
-	// Test searchNavigate prev wrapping
+
 	tab.searchNavigate(-1)
 	if tab.searchCurrent != 1 {
 		t.Errorf("expected current to wrap to 1, got %d", tab.searchCurrent)
 	}
-	
-	// Test searchNavigate empty
+
 	tab.searchResults = nil
 	tab.searchCurrent = 5
 	tab.searchNavigate(1)
@@ -264,7 +245,7 @@ func TestFormatSize(t *testing.T) {
 
 func TestAddHeaders(t *testing.T) {
 	tab := NewRequestTab("test")
-	
+
 	tab.addHeader("User-Agent", "Custom")
 	if len(tab.Headers) != 1 {
 		t.Fatalf("expected 1 header, got %d", len(tab.Headers))
@@ -272,7 +253,7 @@ func TestAddHeaders(t *testing.T) {
 	if tab.Headers[0].Key.Text() != "User-Agent" || tab.Headers[0].Value.Text() != "Custom" || tab.Headers[0].IsGenerated {
 		t.Errorf("unexpected header state: %+v", tab.Headers[0])
 	}
-	
+
 	tab.addSystemHeader("Content-Type", "application/json")
 	if len(tab.Headers) != 2 {
 		t.Fatalf("expected 2 headers, got %d", len(tab.Headers))
@@ -284,12 +265,11 @@ func TestAddHeaders(t *testing.T) {
 
 func TestUpdateSystemHeaders_Conflicts(t *testing.T) {
 	tab := NewRequestTab("test")
-	
-	// User has a manual header that matches what system would generate
+
 	tab.addHeader("Content-Type", "application/json")
-	tab.ReqEditor.SetText(`{"a": 1}`) // would normally generate application/json
+	tab.ReqEditor.SetText(`{"a": 1}`)
 	tab.updateSystemHeaders()
-	
+
 	count := 0
 	for _, h := range tab.Headers {
 		if h.Key.Text() == "Content-Type" {

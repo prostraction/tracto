@@ -6,8 +6,6 @@ func TestTokenizeXML_Simple(t *testing.T) {
 	src := []byte(`<root><item id="1">hello</item></root>`)
 	tokens := TokenizeXML(src)
 
-	// Expect: < root < item id = "1" > hello < / item > < / root >
-	// Bracket and tag entries should appear; check critical ones.
 	var (
 		gotKeyword []string
 		gotKey     []string

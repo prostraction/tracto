@@ -48,16 +48,16 @@ func TestSanitizeBytes(t *testing.T) {
 		{
 			name:     "special spaces normalized",
 			input:    []byte("hello\u2028world\u2029"),
-			expected: "hello\u2028world\u2029", // Valid UTF-8 without control chars skips sanitization
+			expected: "hello\u2028world\u2029",
 		},
 		{
 			name:     "zero width chars removed",
 			input:    []byte("hello\u200b\ufeffworld"),
-			expected: "hello\u200b\ufeffworld", // Valid UTF-8 without control chars skips sanitization
+			expected: "hello\u200b\ufeffworld",
 		},
 		{
 			name:     "del and above removed",
-			input:    []byte("hello\x7f\x1fworld"), // use a control char \x1f to force sanitization
+			input:    []byte("hello\x7f\x1fworld"),
 			expected: "helloworld",
 		},
 	}
@@ -126,7 +126,7 @@ func TestSanitizeText(t *testing.T) {
 		{
 			name:     "del and above removed",
 			input:    "hello\x7f\x9fworld",
-			expected: "hello\ufffdworld", // \x9f is invalid utf-8 byte, so it becomes replacement character
+			expected: "hello\ufffdworld",
 		},
 	}
 

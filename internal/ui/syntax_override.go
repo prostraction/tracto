@@ -6,10 +6,6 @@ import (
 	"strings"
 )
 
-// tokenColorEntry describes one user-tunable syntax color: a label, a
-// getter for the theme default (so we can show it in the editor), and
-// getter/setter for the matching ThemeSyntaxOverride field. The list
-// in tokenColorTable below is what the settings UI iterates over.
 type tokenColorEntry struct {
 	label   string
 	getBase func(s syntaxPalette) color.NRGBA
@@ -104,10 +100,6 @@ var tokenColorTable = []tokenColorEntry{
 	},
 }
 
-// applySyntaxOverride walks the override and replaces base palette
-// entries with whatever parses successfully. Invalid hex strings are
-// silently ignored — keeps the editor's "type as you go" experience
-// from triggering color flicker on partial input.
 func applySyntaxOverride(base syntaxPalette, ov ThemeSyntaxOverride) syntaxPalette {
 	if c, ok := parseHexColor(ov.Plain); ok {
 		base.Plain = c
@@ -154,14 +146,10 @@ func applySyntaxOverride(base syntaxPalette, ov ThemeSyntaxOverride) syntaxPalet
 	return base
 }
 
-// parseHexColor accepts "#RRGGBB", "#RGB", "RRGGBB" or "RGB". Alpha is
-// always 255 — token coloring is opaque, RGBA wouldn't add anything and
-// would let users accidentally render invisible text.
 func parseHexColor(s string) (color.NRGBA, bool) {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "#")
 	if len(s) == 3 {
-		// Expand short form: "abc" → "aabbcc".
 		s = string([]byte{s[0], s[0], s[1], s[1], s[2], s[2]})
 	}
 	if len(s) != 6 {

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image"
+	"image/color"
 	"strings"
 	"unicode"
 
@@ -68,20 +69,8 @@ func measureTextWidthCached(gtx layout.Context, th *material.Theme, size unit.Sp
 	return w
 }
 
-// monoFont is the monospace font used for the request/response body
-// editors, var chips, and any other code-shaped UI. The bundled
-// JetBrains Mono collection is registered on the theme's shaper in
-// app.go; this value simply names that typeface so gio resolves it to
-// the right Style/Weight face without touching system font files.
 var monoFont = font.Font{Typeface: jetbrainsMonoTypeface}
 
-// monoLabel / monoButton / monoEditor wrap the corresponding material
-// constructors and force Font.Typeface = JetBrains Mono on the returned
-// value. Default material widgets pick up `th.Face` (the theme
-// default, which we keep as gofont for UI chrome), so any widget that
-// lives inside the "code" zones — URL row, request/response body,
-// request headers, search panel, etc. — goes through these helpers to
-// opt into the mono face explicitly.
 func monoLabel(th *material.Theme, size unit.Sp, txt string) material.LabelStyle {
 	l := material.Label(th, size, txt)
 	l.Font.Typeface = jetbrainsMonoTypeface
@@ -165,12 +154,6 @@ func getLineMetrics(gtx layout.Context, th *material.Theme, textSize unit.Sp) (i
 	return lineHeight, lineSpacing
 }
 
-// VarHoverState is the cross-editor "you're hovering / clicking on
-// {{var}}" message that flows through GlobalVarHover / GlobalVarClick
-// to the popup machinery in app.go. Editor is an opaque tag — only
-// identity-compared (e.g. in pointer.Leave to clear hover state for
-// the right chip), so it can be either *widget.Editor (TextField,
-// TextFieldOverlay) or *RequestEditor (the request body editor).
 type VarHoverState struct {
 	Name   string
 	Pos    f32.Point
@@ -282,13 +265,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 						start: start,
 						end:   end,
 					})
-					// Hover detection moved to event-based pointer.Enter/Leave
-					// in the click loop below — the previous position-based
-					// check used GlobalPointerPos in window coords against
-					// rect coords in editor-local space, so a cursor near
-					// window (0,0) ghost-matched any var rect with a small
-					// x1/yOff and produced a stray "Not found" tooltip near
-					// the title bar.
+
 				}
 
 				idx = end
@@ -305,12 +282,17 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	call := macro.Stop()
 
 	finalWidth := availWidth
-	finalHeight := dims.Size.Y + (pY * 2)
+	naturalH := dims.Size.Y + (pY * 2)
+	finalHeight := naturalH
 	if finalHeight < gtx.Constraints.Min.Y {
 		finalHeight = gtx.Constraints.Min.Y
 	}
 	if finalHeight > gtx.Constraints.Max.Y {
 		finalHeight = gtx.Constraints.Max.Y
+	}
+	extraY := 0
+	if finalHeight > naturalH {
+		extraY = (finalHeight - naturalH) / 2
 	}
 
 	finalSize := image.Point{X: finalWidth, Y: finalHeight}
@@ -318,25 +300,17 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 	paint.FillShape(gtx.Ops, colorBgField, rect.Op(gtx.Ops))
 
 	if drawBorder {
-		borderColor := colorBorderLight
+		borderColor := colorBorder
 		if gtx.Focused(ed) {
 			borderColor = colorAccent
 		}
-		border := widget.Border{
-			Color:        borderColor,
-			CornerRadius: unit.Dp(2),
-			Width:        unit.Dp(1),
-		}
-		bCtx := gtx
-		bCtx.Constraints.Min = finalSize
-		bCtx.Constraints.Max = finalSize
-		border.Layout(bCtx, func(layout.Context) layout.Dimensions {
-			return layout.Dimensions{Size: finalSize}
-		})
+		paintBorder1px(gtx, finalSize, borderColor)
 	}
 
 	textClip := clip.Rect{Max: finalSize}.Push(gtx.Ops)
+	textOffset := op.Offset(image.Pt(0, extraY)).Push(gtx.Ops)
 	call.Add(gtx.Ops)
+	textOffset.Pop()
 	textClip.Pop()
 
 	if len(varRects) > 0 {
@@ -346,6 +320,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 			tag := varClickTag{ed: ed, start: vr.start}
 			vrLocal := vr.rect
 			stack := clip.Rect(vrLocal).Push(gtx.Ops)
+			pointer.CursorPointer.Add(gtx.Ops)
 			event.Op(gtx.Ops, tag)
 			for {
 				ev, ok := gtx.Event(pointer.Filter{
@@ -366,7 +341,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 						originY := GlobalPointerPos.Y - pe.Position.Y
 						GlobalVarClick = &VarHoverState{
 							Name:   vr.name,
-							Pos:    f32.Pt(originX, originY+float32(vrLocal.Dy())),
+							Pos:    f32.Pt(originX+float32(vrLocal.Min.X), originY+float32(vrLocal.Max.Y)),
 							Editor: ed,
 							Range:  struct{ Start, End int }{vr.start, vr.end},
 						}
@@ -376,7 +351,7 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 					originY := GlobalPointerPos.Y - pe.Position.Y
 					GlobalVarHover = &VarHoverState{
 						Name:   vr.name,
-						Pos:    f32.Pt(originX, originY+float32(vrLocal.Dy())),
+						Pos:    f32.Pt(originX+float32(vrLocal.Min.X), originY+float32(vrLocal.Max.Y)),
 						Editor: ed,
 						Range:  struct{ Start, End int }{vr.start, vr.end},
 					}
@@ -393,7 +368,9 @@ func TextFieldOverlay(gtx layout.Context, th *material.Theme, ed *widget.Editor,
 		callClick := macroClick.Stop()
 
 		textClipClick := clip.Rect{Max: finalSize}.Push(gtx.Ops)
+		clickOffset := op.Offset(image.Pt(0, extraY)).Push(gtx.Ops)
 		callClick.Add(gtx.Ops)
+		clickOffset.Pop()
 		textClipClick.Pop()
 	}
 
@@ -494,7 +471,7 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 						start: start,
 						end:   end,
 					})
-					// See TextFieldOverlay — hover is now event-driven below.
+
 				}
 
 				idx = end
@@ -524,21 +501,11 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 	paint.FillShape(gtx.Ops, colorBgField, rect.Op(gtx.Ops))
 
 	if drawBorder {
-		borderColor := colorBorderLight
+		borderColor := colorBorder
 		if gtx.Focused(ed) {
 			borderColor = colorAccent
 		}
-		border := widget.Border{
-			Color:        borderColor,
-			CornerRadius: unit.Dp(2),
-			Width:        unit.Dp(1),
-		}
-		bCtx := gtx
-		bCtx.Constraints.Min = finalSize
-		bCtx.Constraints.Max = finalSize
-		border.Layout(bCtx, func(layout.Context) layout.Dimensions {
-			return layout.Dimensions{Size: finalSize}
-		})
+		paintBorder1px(gtx, finalSize, borderColor)
 	}
 
 	textClip := clip.Rect{Max: finalSize}.Push(gtx.Ops)
@@ -552,6 +519,7 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 			tag := varClickTag{ed: ed, start: vr.start}
 			vrLocal := vr.rect
 			stack := clip.Rect(vrLocal).Push(gtx.Ops)
+			pointer.CursorPointer.Add(gtx.Ops)
 			event.Op(gtx.Ops, tag)
 			for {
 				ev, ok := gtx.Event(pointer.Filter{
@@ -572,7 +540,7 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 						originY := GlobalPointerPos.Y - pe.Position.Y
 						GlobalVarClick = &VarHoverState{
 							Name:   vr.name,
-							Pos:    f32.Pt(originX, originY+float32(vrLocal.Dy())),
+							Pos:    f32.Pt(originX+float32(vrLocal.Min.X), originY+float32(vrLocal.Max.Y)),
 							Editor: ed,
 							Range:  struct{ Start, End int }{vr.start, vr.end},
 						}
@@ -582,7 +550,7 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 					originY := GlobalPointerPos.Y - pe.Position.Y
 					GlobalVarHover = &VarHoverState{
 						Name:   vr.name,
-						Pos:    f32.Pt(originX, originY+float32(vrLocal.Dy())),
+						Pos:    f32.Pt(originX+float32(vrLocal.Min.X), originY+float32(vrLocal.Max.Y)),
 						Editor: ed,
 						Range:  struct{ Start, End int }{vr.start, vr.end},
 					}
@@ -607,8 +575,61 @@ func TextField(gtx layout.Context, th *material.Theme, ed *widget.Editor, hint s
 }
 
 func SquareBtn(gtx layout.Context, clk *widget.Clickable, ic *widget.Icon, th *material.Theme) layout.Dimensions {
+	return squareBtnSized(gtx, clk, ic, th, 28, 16)
+}
+
+func InlineRenameField(gtx layout.Context, th *material.Theme, ed *widget.Editor) layout.Dimensions {
+	pad := gtx.Dp(unit.Dp(4))
+	macro := op.Record(gtx.Ops)
+	dim := layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		e := material.Editor(th, ed, "")
+		e.TextSize = unit.Sp(12)
+		return e.Layout(gtx)
+	})
+	call := macro.Stop()
+	finalSize := dim.Size
+	if finalSize.X < gtx.Constraints.Min.X {
+		finalSize.X = gtx.Constraints.Min.X
+	}
+	rect := image.Rectangle{Max: finalSize}
+	paint.FillShape(gtx.Ops, colorBgField, clip.UniformRRect(rect, 2).Op(gtx.Ops))
+	borderC := colorBorder
+	if gtx.Focused(ed) {
+		borderC = colorAccent
+	}
+	paintBorder1px(gtx, finalSize, borderC)
+	call.Add(gtx.Ops)
+	dim.Size = finalSize
+	dim.Baseline = dim.Baseline + pad
+	return dim
+}
+
+func SquareBtnSlim(gtx layout.Context, clk *widget.Clickable, ic *widget.Icon, th *material.Theme) layout.Dimensions {
+	return squareBtnSized(gtx, clk, ic, th, 24, 14)
+}
+
+func bordered1px(gtx layout.Context, _ unit.Dp, color color.NRGBA, w layout.Widget) layout.Dimensions {
+	macro := op.Record(gtx.Ops)
+	dims := w(gtx)
+	call := macro.Stop()
+	call.Add(gtx.Ops)
+	paintBorder1px(gtx, dims.Size, color)
+	return dims
+}
+
+func paintBorder1px(gtx layout.Context, sz image.Point, color color.NRGBA) {
+	if sz.X <= 0 || sz.Y <= 0 {
+		return
+	}
+	paint.FillShape(gtx.Ops, color, clip.Rect{Max: image.Pt(sz.X, 1)}.Op())
+	paint.FillShape(gtx.Ops, color, clip.Rect{Min: image.Pt(0, sz.Y - 1), Max: sz}.Op())
+	paint.FillShape(gtx.Ops, color, clip.Rect{Max: image.Pt(1, sz.Y)}.Op())
+	paint.FillShape(gtx.Ops, color, clip.Rect{Min: image.Pt(sz.X - 1, 0), Max: sz}.Op())
+}
+
+func squareBtnSized(gtx layout.Context, clk *widget.Clickable, ic *widget.Icon, th *material.Theme, dpBox, dpIcon int) layout.Dimensions {
 	return clk.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		size := gtx.Dp(unit.Dp(28))
+		size := gtx.Dp(unit.Dp(float32(dpBox)))
 		gtx.Constraints.Min = image.Point{X: size, Y: size}
 		gtx.Constraints.Max = gtx.Constraints.Min
 
@@ -618,9 +639,10 @@ func SquareBtn(gtx layout.Context, clk *widget.Clickable, ic *widget.Icon, th *m
 			bg = colorBgHover
 		}
 		paint.FillShape(gtx.Ops, bg, rect.Op(gtx.Ops))
+		paintBorder1px(gtx, gtx.Constraints.Min, colorBorder)
 
 		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Min = image.Point{X: gtx.Dp(unit.Dp(16)), Y: gtx.Dp(unit.Dp(16))}
+			gtx.Constraints.Min = image.Point{X: gtx.Dp(unit.Dp(float32(dpIcon))), Y: gtx.Dp(unit.Dp(float32(dpIcon)))}
 			return ic.Layout(gtx, th.Palette.Fg)
 		})
 	})
@@ -649,11 +671,7 @@ func menuOption(gtx layout.Context, th *material.Theme, clk *widget.Clickable, t
 }
 
 func isSeparator(r rune) bool {
-	// `-` is intentionally NOT a separator — names like `my-key` and
-	// `Content-Type` should select as one word on double-click.
-	// Quote characters (`"`, `'`, `` ` ``) ARE separators so a
-	// double-click on a JSON string value picks up the inner text
-	// without dragging the surrounding quotes into the selection.
+
 	return unicode.IsSpace(r) || strings.ContainsRune(".,:;!?()[]{}\"'`", r)
 }
 
@@ -664,11 +682,11 @@ func moveWord(s string, pos int, dir int) int {
 			return len(runes)
 		}
 		i := pos
-		// Skip initial separator
+
 		for i < len(runes) && isSeparator(runes[i]) {
 			i++
 		}
-		// Skip word
+
 		for i < len(runes) && !isSeparator(runes[i]) {
 			i++
 		}
@@ -678,11 +696,11 @@ func moveWord(s string, pos int, dir int) int {
 			return 0
 		}
 		i := pos - 1
-		// Skip initial separator
+
 		for i >= 0 && isSeparator(runes[i]) {
 			i--
 		}
-		// Skip word
+
 		for i >= 0 && !isSeparator(runes[i]) {
 			i--
 		}

@@ -37,7 +37,7 @@ func TestSidebarLayout(t *testing.T) {
 	col.Root.Collection = col
 	col.Root.Children[0].Parent = col.Root
 	col.Root.Children[0].Collection = col
-	
+
 	ui.Collections = append(ui.Collections, &CollectionUI{Data: col})
 	ui.updateVisibleCols()
 
@@ -56,23 +56,20 @@ func TestSidebarLayout(t *testing.T) {
 
 	ui.layoutSidebar(gtx)
 
-	// Test state changes directly since Click() depends on gtx.Source
 	ui.ColsExpanded = false
 	ui.layoutSidebar(gtx)
 	ui.ColsExpanded = true
-	
+
 	node := ui.VisibleCols[1]
 	node.MenuOpen = true
 	ui.layoutSidebar(gtx)
 	node.MenuOpen = false
 
-	// Test Select Env
 	ui.ActiveEnvID = "e1"
 	ui.layoutSidebar(gtx)
 	ui.ActiveEnvID = ""
 	ui.layoutSidebar(gtx)
 
-	// Test Env Edit Mode
 	ui.EditingEnv = ui.Environments[0]
 	ui.layoutSidebar(gtx)
 }
@@ -83,17 +80,14 @@ func TestSidebar_FolderCreation(t *testing.T) {
 	col := &ParsedCollection{
 		ID: "c1",
 		Root: &CollectionNode{
-			Name: "Root",
+			Name:     "Root",
 			IsFolder: true,
 		},
 	}
 	col.Root.Collection = col
 	ui.Collections = append(ui.Collections, &CollectionUI{Data: col})
 	ui.updateVisibleCols()
-	
-	// Test tree mutations via clone/delete logic if possible, 
-	// or just cover the functions that layoutSidebar calls.
-	
+
 	newNode := cloneNode(col.Root, nil)
 	if newNode.Name != "Root Copy" {
 		t.Errorf("expected Root Copy, got %s", newNode.Name)

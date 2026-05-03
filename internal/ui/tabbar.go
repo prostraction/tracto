@@ -373,9 +373,6 @@ func (ui *AppUI) layoutTabBar(gtx layout.Context) layout.Dimensions {
 											return material.Clickable(gtx, &tab.TabBtn, func(gtx layout.Context) layout.Dimensions {
 												gtx.Constraints.Min = gtx.Constraints.Max
 												return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-													// Active tab nudges its label 1px down so the
-													// glyphs sit visually centred under the accent
-													// underline; inactive tabs stay symmetric.
 													topPad, bottomPad := unit.Dp(2), unit.Dp(2)
 													if idx == ui.ActiveIdx {
 														topPad, bottomPad = unit.Dp(3), unit.Dp(1)

@@ -21,7 +21,7 @@ func TestCancelRequest(t *testing.T) {
 	tab := &RequestTab{}
 	called := false
 	tab.cancelFn = func() { called = true }
-	
+
 	tab.cancelRequest()
 	if !called {
 		t.Errorf("expected cancelFn to be called")
@@ -35,13 +35,13 @@ func TestCleanupRespFile(t *testing.T) {
 	tab := &RequestTab{}
 	tmp, _ := os.CreateTemp("", "test")
 	tmp.Close()
-	
+
 	tab.respFile = tmp.Name()
-	
+
 	win := new(app.Window)
 	armInvalidateTimer(&tab.reqWidthTimer, win, 1*time.Minute)
 	armInvalidateTimer(&tab.respWidthTimer, win, 1*time.Minute)
-	
+
 	tab.cleanupRespFile()
 	if tab.respFile != "" {
 		t.Errorf("expected respFile to be cleared")
@@ -59,21 +59,21 @@ func TestPrepareRequest(t *testing.T) {
 	tab.Method = "POST"
 	tab.URLInput.SetText("{{host}}/api")
 	tab.ReqEditor.SetText("{\"key\": \"{{val}}\"} // comment")
-	
+
 	tab.addHeader("Auth", "Bearer {{token}}")
-	
+
 	env := map[string]string{
-		"host": "example.com",
-		"val": "123",
+		"host":  "example.com",
+		"val":   "123",
 		"token": "secret",
 	}
-	
+
 	req, ctx, cancel, err := tab.prepareRequest(context.Background(), env)
 	if err != nil {
 		t.Fatalf("prepareRequest error: %v", err)
 	}
 	defer cancel()
-	
+
 	if req.Method != "POST" {
 		t.Errorf("expected POST, got %s", req.Method)
 	}
@@ -83,14 +83,14 @@ func TestPrepareRequest(t *testing.T) {
 	if req.Header.Get("Auth") != "Bearer secret" {
 		t.Errorf("expected auth header, got %s", req.Header.Get("Auth"))
 	}
-	
+
 	buf := make([]byte, 100)
 	n, _ := req.Body.Read(buf)
 	bodyStr := string(buf[:n])
 	if bodyStr != "{\"key\": \"123\"} " {
 		t.Errorf("expected body without comment and templated, got %q", bodyStr)
 	}
-	
+
 	if ctx == nil {
 		t.Errorf("expected context")
 	}
@@ -117,10 +117,10 @@ func TestExecuteRequest(t *testing.T) {
 	tab.PreviewEnabled = true
 	tab.URLInput.SetText(srv.URL)
 	tab.Method = "GET"
-	
+
 	win := new(app.Window)
 	tab.executeRequest(context.Background(), win, nil)
-	
+
 	select {
 	case res := <-tab.responseChan:
 		if !strings.HasPrefix(res.status, "200 OK") {
@@ -142,17 +142,17 @@ func TestExecuteRequestToFile(t *testing.T) {
 	tab.PreviewEnabled = false
 	tab.URLInput.SetText(srv.URL)
 	tab.Method = "GET"
-	
+
 	tmp, _ := os.CreateTemp("", "save-target")
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	
+
 	tab.SaveToFilePath = tmpPath
 	tab.beginRequest()
-	
+
 	win := new(app.Window)
 	tab.executeRequestToFile(context.Background(), win, nil, tmp)
-	
+
 	select {
 	case res := <-tab.responseChan:
 		if !strings.HasPrefix(res.status, "200 OK") {
@@ -161,7 +161,7 @@ func TestExecuteRequestToFile(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Errorf("timeout")
 	}
-	
+
 	data, _ := os.ReadFile(tmpPath)
 	if string(data) != "file content" {
 		t.Errorf("file content mismatch")
@@ -178,7 +178,7 @@ func TestExecuteRequest_Error(t *testing.T) {
 	tab.URLInput.SetText(srv.URL)
 	win := new(app.Window)
 	tab.executeRequest(context.Background(), win, nil)
-	
+
 	select {
 	case res := <-tab.responseChan:
 		if !strings.HasPrefix(res.status, "404 Not Found") {
@@ -191,7 +191,7 @@ func TestExecuteRequest_Error(t *testing.T) {
 
 func TestExecuteRequest_PrepareError(t *testing.T) {
 	tab := NewRequestTab("test")
-	tab.URLInput.SetText("   ") // empty URL causes prepareRequest error
+	tab.URLInput.SetText("   ")
 	win := new(app.Window)
 	tab.executeRequest(context.Background(), win, nil)
 	if !strings.HasPrefix(tab.Status, "Error") {
@@ -199,18 +199,12 @@ func TestExecuteRequest_PrepareError(t *testing.T) {
 	}
 }
 
-// TestSendResponse_DeliversOnCanceledContext guards the Cancel button
-// bug: if sendResponse raced its delivery against ctx.Done(), a
-// canceled context (the exact state when the user hits Cancel) made
-// the "Cancelled" status disappear ~50% of the time via Go's random
-// select, leaving isRequesting stuck at true and the Cancel button
-// permanently on screen.
 func TestSendResponse_DeliversOnCanceledContext(t *testing.T) {
 	tab := NewRequestTab("test")
 	tab.requestID.Store(5)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // ctx is Done BEFORE sendResponse runs — the Cancel scenario.
+	cancel()
 
 	if !tab.sendResponse(ctx, tabResponse{requestID: 5, status: "Cancelled"}) {
 		t.Fatalf("sendResponse returned false even though responseChan was empty")
@@ -230,22 +224,19 @@ func TestSendResponse_StaleID(t *testing.T) {
 	tab := NewRequestTab("test")
 	tab.requestID.Store(10)
 
-	// Send stale response
 	tab.sendResponse(context.Background(), tabResponse{requestID: 9, status: "Stale"})
-	
-	// Call layout (mocked) to process channel
+
 	th := material.NewTheme()
 	gtx := layout.Context{Ops: new(op.Ops)}
-	tab.layout(gtx, th, new(app.Window), nil, false, func(){}, func(*ParsedCollection){})
-	
+	tab.layout(gtx, th, new(app.Window), nil, nil, false, func() {}, func(*ParsedCollection) {})
+
 	if tab.Status == "Stale" {
 		t.Errorf("stale response should be ignored")
 	}
-	
-	// Fresh response
+
 	tab.sendResponse(context.Background(), tabResponse{requestID: 10, status: "Fresh"})
-	tab.layout(gtx, th, new(app.Window), nil, false, func(){}, func(*ParsedCollection){})
-	
+	tab.layout(gtx, th, new(app.Window), nil, nil, false, func() {}, func(*ParsedCollection) {})
+
 	if !strings.Contains(tab.Status, "Fresh") {
 		t.Errorf("fresh response should be accepted, got %s", tab.Status)
 	}
@@ -256,7 +247,7 @@ func TestExecuteRequestToFile_Error(t *testing.T) {
 	tab.URLInput.SetText("http://localhost:1")
 	failWriter := &failingWriteCloser{}
 	tab.executeRequestToFile(context.Background(), new(app.Window), nil, failWriter)
-	
+
 	select {
 	case res := <-tab.responseChan:
 		if !strings.Contains(res.status, "Error") {
@@ -268,8 +259,9 @@ func TestExecuteRequestToFile_Error(t *testing.T) {
 }
 
 type failingWriteCloser struct{}
+
 func (f *failingWriteCloser) Write(p []byte) (n int, err error) { return 0, io.ErrClosedPipe }
-func (f *failingWriteCloser) Close() error { return nil }
+func (f *failingWriteCloser) Close() error                      { return nil }
 
 func TestStreamResponse_Cancellation(t *testing.T) {
 	tab := NewRequestTab("test")

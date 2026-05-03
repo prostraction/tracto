@@ -33,17 +33,16 @@ func TestTokenizeJSON_BracketDepth(t *testing.T) {
 	src := []byte(`{"a":[1,{"b":2}]}`)
 	tokens := TokenizeJSON(src)
 
-	// Brackets in this stream, in order: { [ { } ] }
 	wantBrackets := []struct {
 		offset int
 		depth  uint8
 	}{
-		{offset: 0, depth: 0},  // outer {
-		{offset: 5, depth: 1},  // [
-		{offset: 8, depth: 2},  // inner {
-		{offset: 14, depth: 2}, // inner }
-		{offset: 15, depth: 1}, // ]
-		{offset: 16, depth: 0}, // outer }
+		{offset: 0, depth: 0},
+		{offset: 5, depth: 1},
+		{offset: 8, depth: 2},
+		{offset: 14, depth: 2},
+		{offset: 15, depth: 1},
+		{offset: 16, depth: 0},
 	}
 
 	var got []struct {
@@ -77,15 +76,15 @@ func TestTokenizeJSON_LiteralsAndNumbers(t *testing.T) {
 		kinds = append(kinds, tok.Kind)
 	}
 	want := []TokenKind{
-		TokBracket,     // [
-		TokBool,        // true
-		TokPunctuation, // ,
-		TokBool,        // false
-		TokPunctuation, // ,
-		TokNull,        // null
-		TokPunctuation, // ,
-		TokNumber,      // -3.14e+10
-		TokBracket,     // ]
+		TokBracket,
+		TokBool,
+		TokPunctuation,
+		TokBool,
+		TokPunctuation,
+		TokNull,
+		TokPunctuation,
+		TokNumber,
+		TokBracket,
 	}
 	if len(kinds) != len(want) {
 		t.Fatalf("len(kinds) = %d, want %d (%v)", len(kinds), len(want), kinds)
@@ -119,9 +118,9 @@ func TestTokenizeJSON_KeyVsString(t *testing.T) {
 
 func TestDetect(t *testing.T) {
 	cases := []struct {
-		name    string
-		ct      string
-		body    []byte
+		name     string
+		ct       string
+		body     []byte
 		wantLang Lang
 	}{
 		{"json header", "application/json", nil, LangJSON},

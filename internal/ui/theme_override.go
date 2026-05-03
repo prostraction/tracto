@@ -4,11 +4,6 @@ import (
 	"image/color"
 )
 
-// paletteColorEntry describes one user-tunable chrome color: a label,
-// a getter for the theme default (so we can show it in the editor) and
-// getter/setter for the matching ThemeColorOverride field. Mirrors
-// tokenColorEntry's shape exactly so settings_editor.go can reuse the
-// same row widget for both syntax tokens and palette colors.
 type paletteColorEntry struct {
 	label   string
 	getBase func(p palette) color.NRGBA
@@ -49,9 +44,6 @@ var paletteColorTable = []paletteColorEntry{
 	{label: "Divider — light", getBase: func(p palette) color.NRGBA { return p.DividerLight }, getOv: func(o ThemeColorOverride) string { return o.DividerLight }, setOv: func(o *ThemeColorOverride, h string) { o.DividerLight = h }},
 }
 
-// applyThemeOverride patches palette p with whatever hex strings parse
-// successfully out of ov. Invalid / empty fields fall through to the
-// theme default — same forgiving rules as applySyntaxOverride.
 func applyThemeOverride(p palette, ov ThemeColorOverride) palette {
 	if c, ok := parseHexColor(ov.Bg); ok {
 		p.Bg = c

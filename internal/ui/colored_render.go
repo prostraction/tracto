@@ -18,29 +18,11 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
-// coloredSpan is a contiguous byte range within a chunk that should be
-// painted with a specific color. Spans must be sorted by Start and be
-// non-overlapping; bytes not covered by any span are painted with the
-// caller's defaultColor.
 type coloredSpan struct {
 	Start, End int
 	Color      color.NRGBA
 }
 
-// paintColoredText is a multi-color analogue of widget.Label.Layout.
-// It shapes txt once, walks the resulting glyph stream while tracking
-// the underlying byte offset, groups consecutive same-color glyphs per
-// line, and paints each group as its own clip.Outline + ColorOp pass.
-//
-// The shaper's wrap math runs only once over the full text, so wrap-
-// mode line breaks land at the same positions whether spans are dense
-// or empty — color cycling never causes layout drift compared to the
-// single-color renderer.
-//
-// spans must be sorted by Start (the JSON tokenizer emits them in
-// order); a single forward pointer (spanIdx) advances through the
-// slice as bytes pass each span. This stays O(glyphs + spans) per
-// chunk.
 func paintColoredText(
 	gtx layout.Context,
 	shaper *text.Shaper,
@@ -61,9 +43,6 @@ func paintColoredText(
 		Locale:  gtx.Locale,
 	}
 	if wrap {
-		// Same WrapGraphemes policy ResponseViewer's single-color render
-		// uses — keeps selection / search highlight rects aligned with
-		// the painted glyphs.
 		params.WrapPolicy = text.WrapGraphemes
 		params.MaxWidth = maxW
 	} else {
@@ -86,10 +65,6 @@ func paintColoredText(
 		spanIdx    int
 	)
 
-	// colorAtByte returns the color active at byte b. Spans are pre-
-	// sorted, and the shaper walks bytes monotonically for LTR text
-	// (the only case JSON realistically produces), so the spanIdx
-	// cursor only moves forward.
 	colorAtByte := func(b int) color.NRGBA {
 		for spanIdx < len(spans) && spans[spanIdx].End <= b {
 			spanIdx++
@@ -100,12 +75,6 @@ func paintColoredText(
 		return defaultColor
 	}
 
-	// flushLine paints each color run with its own Affine — shaper.Shape
-	// emits glyph positions relative to gs[0].X (the first glyph of the
-	// slice it's given), so a subset that starts mid-line would shift
-	// LEFT by (run[0].X - line[0].X) if we pushed a single line-wide
-	// affine. Pushing per-run offsets keeps every glyph painted at its
-	// originally shaped absolute position.
 	flushLine := func() {
 		if len(lineGlyphs) == 0 {
 			return
@@ -135,9 +104,6 @@ func paintColoredText(
 	}
 
 	for g, ok := shaper.NextGlyph(); ok; g, ok = shaper.NextGlyph() {
-		// Bounds bookkeeping (mirrors textIterator.processGlyph in
-		// widget.Label) so callers can use the returned Dimensions for
-		// chunkHeight tracking just like the single-color path.
 		logicalBounds := image.Rectangle{
 			Min: image.Pt(g.X.Floor(), int(g.Y)-g.Ascent.Ceil()),
 			Max: image.Pt((g.X + g.Advance).Ceil(), int(g.Y)+g.Descent.Ceil()),
@@ -165,8 +131,6 @@ func paintColoredText(
 		lineGlyphs = append(lineGlyphs, g)
 		lineColors = append(lineColors, col)
 
-		// Advance byteIdx by g.Runes runes' worth of bytes. utf8 handles
-		// 2-byte Cyrillic / 3-byte CJK / 4-byte SMP transparently.
 		for r := uint16(0); r < g.Runes; r++ {
 			if byteIdx >= len(txt) {
 				break

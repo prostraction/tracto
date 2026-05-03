@@ -50,10 +50,6 @@ type EnvironmentUI struct {
 	BackBtn    widget.Clickable
 	NameEditor widget.Editor
 
-	// Inline rename in the sidebar — separate flow from the full
-	// EnvEditor panel that EditBtn opens. Double-click on the row's
-	// name in the sidebar flips IsRenaming to true; commit (Enter /
-	// loss of focus) writes back to Data.Name.
 	IsRenaming      bool
 	RenamingFocused bool
 	InlineNameEd    widget.Editor

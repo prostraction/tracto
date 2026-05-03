@@ -13,7 +13,6 @@ func TestNodePathFromAndAtPath(t *testing.T) {
 	root.Children = []*CollectionNode{child1, child2}
 	child2.Children = []*CollectionNode{subchild}
 
-	// Test nodePathFrom
 	path := nodePathFrom(root, subchild)
 	if len(path) != 2 || path[0] != 1 || path[1] != 0 {
 		t.Errorf("expected [1, 0], got %v", path)
@@ -47,7 +46,6 @@ func TestNodePathFromAndAtPath(t *testing.T) {
 		t.Errorf("expected nil path for detached child, got %v", pathDetached)
 	}
 
-	// Test nodeAtPath
 	found := nodeAtPath(root, []int{1, 0})
 	if found != subchild {
 		t.Errorf("expected subchild, got %v", found)
@@ -72,9 +70,9 @@ func TestNodePathFromAndAtPath(t *testing.T) {
 func TestCloneNode(t *testing.T) {
 	col := &ParsedCollection{ID: "col1"}
 	root := &CollectionNode{
-		Name:     "req",
-		IsFolder: false,
-		Depth:    1,
+		Name:       "req",
+		IsFolder:   false,
+		Depth:      1,
 		Collection: col,
 		Request: &ParsedRequest{
 			Name:   "req",
@@ -110,14 +108,12 @@ func TestCloneNode(t *testing.T) {
 	if clone.Request.Headers["Content-Type"] != "application/json" {
 		t.Errorf("expected header application/json")
 	}
-	
-	// Check deep copy of headers
+
 	root.Request.Headers["Content-Type"] = "text/plain"
 	if clone.Request.Headers["Content-Type"] != "application/json" {
 		t.Errorf("expected clone to retain original header, got %s", clone.Request.Headers["Content-Type"])
 	}
 
-	// Check clone with children
 	folder := &CollectionNode{
 		Name:     "folder",
 		IsFolder: true,
@@ -219,7 +215,7 @@ func TestParseCollection(t *testing.T) {
 	if req1.Request.Headers["Accept"] != "application/json" {
 		t.Errorf("expected header Accept: application/json")
 	}
-	
+
 	req2 := folder.Children[1]
 	if req2.Request.URL != "http://example.com/api" {
 		t.Errorf("expected url, got %s", req2.Request.URL)
@@ -230,20 +226,17 @@ func TestParseCollection(t *testing.T) {
 		t.Errorf("expected string url, got %s", req3.Request.URL)
 	}
 
-	// Test invalid JSON
 	_, err = ParseCollection(strings.NewReader("invalid"), "id2")
 	if err == nil {
 		t.Errorf("expected error for invalid json")
 	}
 
-	// Test empty name uses default but has items
 	jsonWithItems := `{"info": {"name": ""}, "item": [{"name": "Req"}]}`
 	colEmpty, _ := ParseCollection(strings.NewReader(jsonWithItems), "id3")
 	if colEmpty.Name != "Imported Collection" {
 		t.Errorf("expected Imported Collection, got %s", colEmpty.Name)
 	}
 
-	// Test really empty fails
 	jsonReallyEmpty := `{"info": {"name": ""}, "item": []}`
 	_, err = ParseCollection(strings.NewReader(jsonReallyEmpty), "id4")
 	if err == nil {
@@ -256,10 +249,10 @@ func TestAssignParents(t *testing.T) {
 	root := &CollectionNode{Name: "root"}
 	child := &CollectionNode{Name: "child"}
 	subchild := &CollectionNode{Name: "subchild"}
-	
+
 	root.Children = append(root.Children, child)
 	child.Children = append(child.Children, subchild)
-	
+
 	assignParents(root, nil, col)
 
 	if child.Parent != root {

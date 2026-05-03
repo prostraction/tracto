@@ -5,10 +5,6 @@ import (
 	"testing"
 )
 
-// validateLineStarts cross-checks the editor's incrementally-maintained
-// lineStarts against a fresh full rebuild from byte 0. Drift here means
-// Insert/DeleteRange's update path is missing or duplicating an entry,
-// which manifests later as off-by-N selection / scroll glitches.
 func validateLineStarts(t *testing.T, v *RequestEditor) {
 	t.Helper()
 	want := []int{0}
@@ -18,18 +14,12 @@ func validateLineStarts(t *testing.T, v *RequestEditor) {
 			want = append(want, i+1)
 			continue
 		}
-		// scanChunks also splits on chunkMaxBytes, mirror that.
 		if i-pos >= chunkMaxBytes {
 			want = append(want, i)
 			pos = i
 		}
 	}
 	_ = pos
-	// We don't assert chunkMaxBytes-induced splits exactly (the
-	// boundary-walking is UTF-8 aware and would over-complicate the
-	// shadow rebuild here); instead, we assert that the editor at
-	// least sees every "\n" as a chunk boundary, which is the
-	// invariant Insert/DeleteRange must preserve.
 	have := make(map[int]struct{}, len(v.lineStarts))
 	for _, s := range v.lineStarts {
 		have[s] = struct{}{}
@@ -62,7 +52,6 @@ func TestRequestEditorInsert(t *testing.T) {
 	}
 	validateLineStarts(t, v)
 
-	// Multi-line insert.
 	v.Insert(0, "a\nb\n")
 	if v.Text() != "a\nb\nhello, world" {
 		t.Fatalf("after multi-line insert got %q", v.Text())
@@ -74,15 +63,14 @@ func TestRequestEditorDeleteRange(t *testing.T) {
 	v := NewRequestEditor()
 	v.SetText("hello, world")
 
-	v.DeleteRange(5, 7) // remove ", "
+	v.DeleteRange(5, 7)
 	if v.Text() != "helloworld" {
 		t.Fatalf("after DeleteRange(5,7) got %q", v.Text())
 	}
 	validateLineStarts(t, v)
 
-	// Delete across a newline.
 	v.SetText("first\nsecond\nthird")
-	v.DeleteRange(3, 9) // "st\nsec"
+	v.DeleteRange(3, 9)
 	if v.Text() != "firond\nthird" {
 		t.Fatalf("after cross-line delete got %q", v.Text())
 	}
@@ -99,7 +87,6 @@ func TestRequestEditorReplace(t *testing.T) {
 	}
 	validateLineStarts(t, v)
 
-	// Replace = pure deletion (empty replacement).
 	v.Replace(3, 8, "")
 	if v.Text() != "foobaz" {
 		t.Fatalf("after Replace with empty got %q", v.Text())
@@ -123,7 +110,6 @@ func TestRequestEditorUndoRedo(t *testing.T) {
 		t.Fatalf("Redo failed; got %q", v.Text())
 	}
 
-	// Undo across a Replace (which records as a single combined op).
 	v.Replace(0, 4, "REPLACED")
 	if v.Text() != "REPLACED text" {
 		t.Fatalf("Replace setup failed: %q", v.Text())
@@ -135,8 +121,6 @@ func TestRequestEditorUndoRedo(t *testing.T) {
 		t.Fatalf("Redo across Replace failed; got %q", v.Text())
 	}
 
-	// SetText must wipe history (programmatic load is not part of the
-	// editing session).
 	v.SetText("fresh")
 	if v.Undo() {
 		t.Fatalf("Undo should have nothing to do after SetText")
@@ -145,7 +129,6 @@ func TestRequestEditorUndoRedo(t *testing.T) {
 
 func TestRequestEditorOverLimit(t *testing.T) {
 	v := NewRequestEditor()
-	// SetText rejects past 100 MB.
 	huge := strings.Repeat("a", RequestBodyMaxBytes+1)
 	if v.SetText(huge) {
 		t.Fatalf("SetText should reject input larger than RequestBodyMaxBytes")
@@ -154,8 +137,6 @@ func TestRequestEditorOverLimit(t *testing.T) {
 		t.Fatalf("buffer should remain empty after rejected SetText, got %d bytes", len(v.text))
 	}
 
-	// Insert that would push the body past the limit is silently
-	// dropped (no panic, no partial write).
 	v.SetText(strings.Repeat("a", RequestBodyMaxBytes-10))
 	v.Insert(0, strings.Repeat("b", 100))
 	if len(v.text) != RequestBodyMaxBytes-10 {
@@ -164,7 +145,6 @@ func TestRequestEditorOverLimit(t *testing.T) {
 }
 
 func TestRequestEditorUndoGrouping(t *testing.T) {
-	// Typing "hello" should collapse into one undo step, not five.
 	v := NewRequestEditor()
 	for i, c := range "hello" {
 		v.Insert(i, string(c))
@@ -182,7 +162,6 @@ func TestRequestEditorUndoGrouping(t *testing.T) {
 		t.Fatalf("after one Undo expected empty, got %q", v.Text())
 	}
 
-	// Whitespace breaks the run.
 	v.SetText("")
 	v.Insert(0, "a")
 	v.Insert(1, "b")
@@ -192,12 +171,11 @@ func TestRequestEditorUndoGrouping(t *testing.T) {
 		t.Fatalf("expected 3 steps (ab | space | c), got %d (stack=%v)", got, v.undoStack)
 	}
 
-	// Backspace chain merges.
 	v.SetText("abcd")
 	v.selStart, v.selEnd = 4, 4
-	v.DeleteRange(3, 4) // 'd'
-	v.DeleteRange(2, 3) // 'c'
-	v.DeleteRange(1, 2) // 'b'
+	v.DeleteRange(3, 4)
+	v.DeleteRange(2, 3)
+	v.DeleteRange(1, 2)
 	if got := len(v.undoStack); got != 1 {
 		t.Fatalf("expected 3 backspaces to merge, got %d", got)
 	}

@@ -55,10 +55,6 @@ func TestRuneIdxToByte(t *testing.T) {
 	}
 }
 
-// TestWordBoundsAt covers the double-click word-selection helper. The
-// range returned should bracket a contiguous run of same-kind runes
-// (word vs separator) around the click point, regardless of whether
-// the click landed on a word char or whitespace.
 func TestWordBoundsAt(t *testing.T) {
 	v := NewResponseViewer()
 	v.SetText("hello world\nfoo.bar")
@@ -67,16 +63,15 @@ func TestWordBoundsAt(t *testing.T) {
 		byteOff            int
 		wantStart, wantEnd int
 	}{
-		// "hello world\nfoo.bar"  (indices: h=0..o=4, ' '=5, w=6..d=10, \n=11, f=12..o=14, .=15, b=16..r=18)
-		{"start of first word", 0, 0, 5},     // 'h' → "hello"
-		{"middle of word", 2, 0, 5},          // 'l' → "hello"
-		{"on space (separator run)", 5, 5, 6}, // ' ' → just the space
-		{"on word 'w' (start of second word)", 6, 6, 11}, // 'w' → "world"
-		{"on newline (separator run)", 11, 11, 12},       // '\n' → just the newline
-		{"start of foo (after newline)", 12, 12, 15},     // 'f' → "foo"
-		{"on dot separator", 15, 15, 16},                 // '.' → just the dot
-		{"on bar word", 17, 16, 19},                      // 'a' → "bar"
-		{"at EOF (walks back into trailing word)", 19, 16, 19}, // EOF → "bar"
+		{"start of first word", 0, 0, 5},
+		{"middle of word", 2, 0, 5},
+		{"on space (separator run)", 5, 5, 6},
+		{"on word 'w' (start of second word)", 6, 6, 11},
+		{"on newline (separator run)", 11, 11, 12},
+		{"start of foo (after newline)", 12, 12, 15},
+		{"on dot separator", 15, 15, 16},
+		{"on bar word", 17, 16, 19},
+		{"at EOF (walks back into trailing word)", 19, 16, 19},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -89,20 +84,8 @@ func TestWordBoundsAt(t *testing.T) {
 	}
 }
 
-// TestSourceLineBoundsAt covers the triple-click line-selection
-// helper. Should return [start, end) of the source line containing
-// byteOff, with start AFTER the previous '\n' (or 0) and end BEFORE
-// the next '\n' (or len(text)).
-// TestWordBoundsAt_QuotesAndHyphens verifies the user-requested
-// behavior: double-click on a JSON string value selects the inner
-// text without the surrounding quotes; hyphens (e.g. Content-Type,
-// my-key) are treated as word characters so the whole identifier is
-// selected as one word.
 func TestWordBoundsAt_QuotesAndHyphens(t *testing.T) {
 	v := NewResponseViewer()
-	// "my-key": "Content-Type"
-	// indices: " =0, m=1..y=2, -=3, k=4..y=6, " =7, : =8, ' '=9, " =10,
-	//          C=11..t=17, -=18, T=19..e=22, " =23
 	v.SetText(`"my-key": "Content-Type"`)
 
 	cases := []struct {
@@ -136,14 +119,14 @@ func TestSourceLineBoundsAt(t *testing.T) {
 	v := NewResponseViewer()
 	v.SetText("line one\nsecond\r\nthird")
 	cases := []struct {
-		name              string
-		byteOff           int
+		name               string
+		byteOff            int
 		wantStart, wantEnd int
 	}{
 		{"first line start", 0, 0, 8},
 		{"first line middle", 4, 0, 8},
 		{"first line end", 8, 0, 8},
-		{"after first newline (= second line start)", 9, 9, 15}, // "second" — \r stripped
+		{"after first newline (= second line start)", 9, 9, 15},
 		{"middle of second line", 12, 9, 15},
 		{"after second newline", 17, 17, 22},
 		{"in third line", 19, 17, 22},
@@ -172,13 +155,10 @@ func TestSelectAll(t *testing.T) {
 	}
 }
 
-// Round-trip property: byteToRuneIdx(t, runeIdxToByte(t, n)) == n for
-// any n in [0, runeCount(t)]. Catches off-by-one in either helper.
 func TestRuneByteRoundTrip(t *testing.T) {
 	texts := []string{"abc", "привет мир", "a\xf0\x9f\x98\x80b\xf0\x9f\x98\x81c", "{\"имя\":\"значение\"}"}
 	for _, txt := range texts {
 		bs := []byte(txt)
-		// Walk every rune index from 0 up to count.
 		for r := 0; ; r++ {
 			b := runeIdxToByte(bs, r)
 			gotR := byteToRuneIdx(bs, b)

@@ -37,7 +37,7 @@ func TestParseEnvironment(t *testing.T) {
 	if len(env.Vars) != 2 {
 		t.Fatalf("expected 2 vars, got %d", len(env.Vars))
 	}
-	
+
 	if env.Vars[0].Key != "API_URL" || env.Vars[0].Value != "http://example.com" || !env.Vars[0].Enabled {
 		t.Errorf("unexpected var 0: %+v", env.Vars[0])
 	}
@@ -45,13 +45,11 @@ func TestParseEnvironment(t *testing.T) {
 		t.Errorf("unexpected var 1: %+v", env.Vars[1])
 	}
 
-	// Test invalid JSON
 	_, err = ParseEnvironment(strings.NewReader("invalid"), "env2")
 	if err == nil {
 		t.Errorf("expected error for invalid json")
 	}
 
-	// Test empty name uses default but has values
 	jsonWithValues := `{"name": "", "values": [{"key":"k","value":"v"}]}`
 	envEmpty, _ := ParseEnvironment(strings.NewReader(jsonWithValues), "env3")
 	if envEmpty.Name != "Imported Environment" {
@@ -64,8 +62,7 @@ func TestParseEnvironment_Errors(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error for invalid json")
 	}
-	
-	// Test really empty
+
 	_, err = ParseEnvironment(strings.NewReader("{}"), "env2")
 	if err == nil {
 		t.Errorf("expected error for empty json object")
@@ -89,7 +86,7 @@ func TestEnvironmentUI_InitEditor(t *testing.T) {
 	if len(ui.Rows) != 2 {
 		t.Fatalf("expected 2 rows, got %d", len(ui.Rows))
 	}
-	
+
 	if ui.Rows[0].KeyEditor.Text() != "k1" || ui.Rows[0].ValEditor.Text() != "v1" || !ui.Rows[0].Enabled.Value {
 		t.Errorf("unexpected row 0: %s %s %v", ui.Rows[0].KeyEditor.Text(), ui.Rows[0].ValEditor.Text(), ui.Rows[0].Enabled.Value)
 	}

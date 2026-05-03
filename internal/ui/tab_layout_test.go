@@ -23,7 +23,7 @@ func TestTabLayout(t *testing.T) {
 	win := new(app.Window)
 	th := material.NewTheme()
 	th.Shaper = material.NewTheme().Shaper
-	
+
 	gtx := layout.Context{
 		Ops:         new(op.Ops),
 		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
@@ -31,65 +31,51 @@ func TestTabLayout(t *testing.T) {
 		Now:         time.Now(),
 	}
 
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
 
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
-	
-	// Test Search
 	tab.SearchOpen = true
 	tab.SearchEditor.SetText("hello")
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
-	
-	// Test preview mode
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
+
 	tab.PreviewEnabled = true
 	tab.respSize = 1000
 	tab.previewLoaded = 500
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
 
-	// Test method list open
 	tab.MethodListOpen = true
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
 
-	// Test send menu open
 	tab.SendMenuOpen = true
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
 
-	// Test headers expanded
 	tab.HeadersExpanded = true
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
 
-	// Test dragging
 	tab.IsDraggingSplit = true
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
 
-	// Test response saved to file but preview disabled
 	tab.PreviewEnabled = false
 	tab.respFile = "some-file"
 	tab.respSize = 100
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
 
-	// Test layoutResponseBody with content
 	tab.PreviewEnabled = true
 	tab.RespEditor.SetText("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n")
 	tab.layoutResponseBody(gtx, th, win, false)
-	
-	// Test without wrap
+
 	tab.WrapEnabled = false
 	tab.layoutResponseBody(gtx, th, win, false)
 
-	// Test isRequesting
 	tab.isRequesting = true
 	tab.downloadedBytes.Store(500)
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
-	
-	// Test response arriving
-	tab.responseChan <- tabResponse{status: "200 OK", respSize: 1000, body: "ok", requestID: tab.requestID.Load()}
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
-	
-	// Test append arriving
-	tab.appendChan <- "more"
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
 
-	// Test FileSaveChan arriving
+	tab.responseChan <- tabResponse{status: "200 OK", respSize: 1000, body: "ok", requestID: tab.requestID.Load()}
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
+
+	tab.appendChan <- "more"
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
+
 	tab.FileSaveChan <- &failingWriteCloser{}
-	tab.layout(gtx, th, win, nil, false, func(){}, func(*ParsedCollection){})
+	tab.layout(gtx, th, win, nil, nil, false, func() {}, func(*ParsedCollection) {})
 }

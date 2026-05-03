@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"tracto/internal/utils"
@@ -22,10 +26,6 @@ func (t *RequestTab) cancelRequest() {
 }
 
 func (t *RequestTab) cleanupRespFile() {
-	// Mark closed and reclaim any file writer the save dialog goroutine may
-	// have already pushed onto FileSaveChan but the (now-defunct) tab.layout
-	// will never drain. The fileSaveMu pairing with the goroutine's pre-send
-	// closed-check closes the rest of the race.
 	t.fileSaveMu.Lock()
 	t.closed.Store(true)
 	select {
@@ -59,6 +59,102 @@ func (t *RequestTab) cleanupRespFile() {
 	}
 }
 
+func (t *RequestTab) buildBody(ctx context.Context, env map[string]string) (io.Reader, string, error) {
+	switch t.BodyType {
+	case BodyNone:
+		return nil, "", nil
+
+	case BodyURLEncoded:
+		vals := url.Values{}
+		for _, p := range t.URLEncoded {
+			k := strings.TrimSpace(p.Key.Text())
+			if k == "" {
+				continue
+			}
+			v := processTemplate(p.Value.Text(), env)
+			vals.Add(k, v)
+		}
+		return strings.NewReader(vals.Encode()), "application/x-www-form-urlencoded", nil
+
+	case BodyFormData:
+		pr, pw := io.Pipe()
+		mw := multipart.NewWriter(pw)
+		go func() {
+			defer func() {
+				if err := mw.Close(); err != nil {
+					pw.CloseWithError(err)
+					return
+				}
+				pw.Close()
+			}()
+			for _, p := range t.FormParts {
+				select {
+				case <-ctx.Done():
+					pw.CloseWithError(ctx.Err())
+					return
+				default:
+				}
+				key := strings.TrimSpace(p.Key.Text())
+				if key == "" {
+					continue
+				}
+				if p.Kind == FormPartFile {
+					if p.FilePath == "" {
+						continue
+					}
+					f, err := os.Open(p.FilePath)
+					if err != nil {
+						pw.CloseWithError(err)
+						return
+					}
+					w, err := mw.CreateFormFile(key, filepath.Base(p.FilePath))
+					if err != nil {
+						f.Close()
+						pw.CloseWithError(err)
+						return
+					}
+					if _, err := io.Copy(w, f); err != nil {
+						f.Close()
+						pw.CloseWithError(err)
+						return
+					}
+					f.Close()
+					continue
+				}
+				if err := mw.WriteField(key, processTemplate(p.Value.Text(), env)); err != nil {
+					pw.CloseWithError(err)
+					return
+				}
+			}
+		}()
+		return pr, mw.FormDataContentType(), nil
+
+	case BodyBinary:
+		if t.BinaryFilePath == "" {
+			return nil, "", errors.New("binary body: no file selected")
+		}
+		f, err := os.Open(t.BinaryFilePath)
+		if err != nil {
+			return nil, "", err
+		}
+		ct := mime.TypeByExtension(filepath.Ext(t.BinaryFilePath))
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		return f, ct, nil
+	}
+
+	reqBody := bodyReplacer.Replace(t.ReqEditor.Text())
+	reqBody = processTemplate(reqBody, env)
+	if currentStripJSONComments {
+		strippedBody := utils.StripJSONComments(reqBody)
+		if json.Valid([]byte(strippedBody)) {
+			reqBody = strippedBody
+		}
+	}
+	return strings.NewReader(reqBody), "", nil
+}
+
 func (t *RequestTab) prepareRequest(parent context.Context, env map[string]string) (*http.Request, context.Context, context.CancelFunc, error) {
 	urlRaw := strings.ReplaceAll(t.URLInput.Text(), "\n", "")
 	urlRaw = strings.TrimSpace(utils.SanitizeText(urlRaw))
@@ -72,20 +168,17 @@ func (t *RequestTab) prepareRequest(parent context.Context, env map[string]strin
 	}
 	url = strings.ReplaceAll(url, " ", "%20")
 
-	reqBody := bodyReplacer.Replace(t.ReqEditor.Text())
-	reqBody = processTemplate(reqBody, env)
-	if currentStripJSONComments {
-		strippedBody := utils.StripJSONComments(reqBody)
-		if json.Valid([]byte(strippedBody)) {
-			reqBody = strippedBody
-		}
-	}
-
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	req, err := http.NewRequestWithContext(ctx, t.Method, url, strings.NewReader(reqBody))
+
+	bodyReader, explicitContentType, buildErr := t.buildBody(ctx, env)
+	if buildErr != nil {
+		cancel()
+		return nil, nil, nil, buildErr
+	}
+	req, err := http.NewRequestWithContext(ctx, t.Method, url, bodyReader)
 	if err != nil {
 		cancel()
 		return nil, nil, nil, err
@@ -105,6 +198,9 @@ func (t *RequestTab) prepareRequest(parent context.Context, env map[string]strin
 			continue
 		}
 		req.Header.Set(k, processTemplate(dh.Value, env))
+	}
+	if explicitContentType != "" {
+		req.Header.Set("Content-Type", explicitContentType)
 	}
 	return req, ctx, cancel, nil
 }
@@ -152,10 +248,6 @@ func (t *RequestTab) beginRequest() {
 }
 
 func (t *RequestTab) sendResponse(_ context.Context, resp tabResponse) bool {
-	// respMu serializes drain+send across goroutines so a stale goroutine
-	// can't pull a fresh response out of the buffer between its own drain
-	// and send. The active-id check (paired with atomic requestID) lets
-	// stale goroutines bail out without touching the channel at all.
 	t.respMu.Lock()
 	defer t.respMu.Unlock()
 	if resp.requestID != t.requestID.Load() {

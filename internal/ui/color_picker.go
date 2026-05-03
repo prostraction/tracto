@@ -16,9 +16,6 @@ import (
 	"github.com/nanorele/gio/widget/material"
 )
 
-
-// hsvToRGB converts H ∈ [0, 360), S/V ∈ [0, 1] into 8-bit opaque RGB.
-// Standard formula; matches Photoshop / web color pickers.
 func hsvToRGB(h, s, v float32) color.NRGBA {
 	if s <= 0 {
 		c := uint8(v * 255)
@@ -60,9 +57,6 @@ func hsvToRGB(h, s, v float32) color.NRGBA {
 	}
 }
 
-// rgbToHSV is the inverse — returns H ∈ [0, 360), S/V ∈ [0, 1]. Used
-// when the picker first opens to seed sliders from the editor's current
-// hex value.
 func rgbToHSV(c color.NRGBA) (h, s, v float32) {
 	r := float32(c.R) / 255
 	g := float32(c.G) / 255
@@ -114,10 +108,6 @@ func modf32(a, m float32) float32 {
 	return r
 }
 
-// pickerKind discriminates which override table the open picker
-// targets. A single picker state serves both the syntax and theme-
-// chrome customizers in Settings; the kind tells the handler which
-// editor slice / override map to write back to.
 type pickerKind uint8
 
 const (
@@ -126,26 +116,12 @@ const (
 	pickerTheme
 )
 
-// colorPickerState bundles the hue/sat/val sliders and gestures for a
-// single picker instance. The settings editor keeps one of these and
-// re-uses it across token rows — only one picker is open at a time.
-//
-// Anchor is in window coordinates (same space as GlobalPointerPos).
-// The picker is rendered as a deferred overlay at app-level rather
-// than inline in the settings list so it floats over the rest of the
-// UI, matching the method-selector dropdown's behaviour.
 type colorPickerState struct {
-	kind    pickerKind
-	openIdx int
-	h       float32
-	s       float32
-	v       float32
-	// lastHSV stores the values committed at the end of the previous
-	// frame. The handler block compares against this to decide whether
-	// a drag-induced change happened — and only then writes back to the
-	// editor / override slot. Initial-open uses this same field to
-	// avoid converting "user merely opened the picker" into "user
-	// chose a color matching the theme default".
+	kind     pickerKind
+	openIdx  int
+	h        float32
+	s        float32
+	v        float32
 	lastHSV  [3]float32
 	svDrag   gesture.Drag
 	hueDrag  gesture.Drag
@@ -154,19 +130,12 @@ type colorPickerState struct {
 	anchor   f32Point
 }
 
-// f32Point is a tiny float-point holder kept package-private to avoid
-// a dependency on gio's f32 package from this file. The shape matches
-// gio's f32.Point so call sites can copy-assign without a helper.
 type f32Point struct {
 	X, Y float32
 }
 
-// isOpen reports whether the picker should render this frame.
 func (p *colorPickerState) isOpen() bool { return p.kind != pickerNone }
 
-// open initialises the picker from a starting color and surfaces it
-// at anchor (window coordinates). Subsequent renders draw the picker
-// UI as a deferred overlay near anchor.
 func (p *colorPickerState) open(kind pickerKind, idx int, c color.NRGBA, anchor f32Point) {
 	p.kind = kind
 	p.openIdx = idx
@@ -175,27 +144,15 @@ func (p *colorPickerState) open(kind pickerKind, idx int, c color.NRGBA, anchor 
 	p.anchor = anchor
 }
 
-// closePicker dismisses the picker and resets gesture state.
 func (p *colorPickerState) closePicker() {
 	p.kind = pickerNone
 	p.openIdx = -1
 }
 
-// CurrentColor returns the live RGB pick. Callers feed it back into
-// the override / editor text on each frame the picker stayed open.
 func (p *colorPickerState) currentColor() color.NRGBA {
 	return hsvToRGB(p.h, p.s, p.v)
 }
 
-// renderColorPicker draws the picker card at (0, 0) of the current
-// gtx — callers wrap it in op.Offset / op.Defer to position it as an
-// overlay. Returns the card's pixel size so the caller can clamp the
-// anchor to keep the popup inside the window.
-//
-// SV area: drawn as a true 2D gradient using two paint.LinearGradientOp
-// passes — horizontal white→hue, then vertical transparent→black with
-// alpha-blend. Hue strip: six LinearGradientOp segments covering the
-// full 360° rainbow with smooth interpolation.
 func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerState) layout.Dimensions {
 	width := gtx.Dp(unit.Dp(240))
 	svH := gtx.Dp(unit.Dp(140))
@@ -212,7 +169,6 @@ func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerSta
 		border = 1
 	}
 
-	// Card background + border.
 	paint.FillShape(gtx.Ops, colorBorderLight, clip.UniformRRect(image.Rectangle{Max: cardSize}, 4).Op(gtx.Ops))
 	innerCard := image.Rect(border, border, cardSize.X-border, cardSize.Y-border)
 	paint.FillShape(gtx.Ops, colorBgPopup, clip.UniformRRect(innerCard, 4).Op(gtx.Ops))
@@ -224,9 +180,6 @@ func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerSta
 		Max: image.Pt(innerOff.X+svW, innerOff.Y+svH),
 	}
 
-	// SV gradient: layer 1 horizontal white→hue, layer 2 vertical
-	// transparent→black. Two LinearGradientOp passes cover the SV
-	// space smoothly without rasterising into a grid.
 	hueColor := hsvToRGB(p.h, 1, 1)
 	{
 		stack := clip.Rect(svRect).Push(gtx.Ops)
@@ -247,7 +200,6 @@ func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerSta
 		stack.Pop()
 	}
 
-	// SV cursor — small contrast ring at (sat·svW, (1-val)·svH).
 	cx := svRect.Min.X + int(p.s*float32(svW-1))
 	cy := svRect.Min.Y + int((1-p.v)*float32(svH-1))
 	r := border * 5
@@ -260,8 +212,6 @@ func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerSta
 		Width: float32(border * 2),
 	}.Op())
 
-	// SV drag handler — gestures Add'd inside the clip rect so events
-	// arrive in svRect-local coords.
 	{
 		stack := clip.Rect(svRect).Push(gtx.Ops)
 		pointer.CursorCrosshair.Add(gtx.Ops)
@@ -293,9 +243,6 @@ func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerSta
 		stack.Pop()
 	}
 
-	// Hue strip — six LinearGradientOp segments covering 0..360°.
-	// Each segment interpolates between two adjacent rainbow stops so
-	// the strip reads as a single smooth gradient.
 	hueY := svRect.Max.Y + gap
 	hueRect := image.Rectangle{
 		Min: image.Pt(innerOff.X, hueY),
@@ -328,8 +275,6 @@ func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerSta
 		paint.PaintOp{}.Add(gtx.Ops)
 		stack.Pop()
 	}
-	// Hue cursor — vertical line with a dark sliver for contrast on
-	// any hue.
 	hcx := hueRect.Min.X + int(p.h/360*float32(svW-1))
 	cursorW := border * 2
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 30, G: 30, B: 30, A: 220}, clip.Rect{
@@ -341,7 +286,6 @@ func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerSta
 		Max: image.Pt(hcx+cursorW/2, hueRect.Max.Y),
 	}.Op())
 
-	// Hue drag handler.
 	{
 		stack := clip.Rect(hueRect).Push(gtx.Ops)
 		pointer.CursorCrosshair.Add(gtx.Ops)
@@ -365,7 +309,6 @@ func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerSta
 		stack.Pop()
 	}
 
-	// Bottom row: preview swatch on the left, close button on the right.
 	rowY := hueRect.Max.Y + gap
 	previewMin := image.Pt(innerOff.X, rowY)
 	previewMax := image.Pt(previewMin.X+previewW, rowY+previewH)
@@ -399,7 +342,4 @@ func renderColorPicker(gtx layout.Context, th *material.Theme, p *colorPickerSta
 	return layout.Dimensions{Size: cardSize}
 }
 
-// keep "event" import live in case future click-outside handling lands
-// here; gio's pointer.Filter targets are set up via event.Op even
-// though renderColorPicker doesn't call it directly today.
 var _ = event.Op
