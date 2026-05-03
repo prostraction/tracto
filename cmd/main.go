@@ -10,7 +10,7 @@ import (
 	"github.com/nanorele/gio/app"
 )
 
-const appTitle = "Rete 0.4.3"
+const appTitle = "Rete 0.4.4"
 const bugReportURL = "https://github.com/nanorele/rete/issues/new"
 
 func main() {
