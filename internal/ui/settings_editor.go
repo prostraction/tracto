@@ -359,19 +359,27 @@ func (ui *AppUI) layoutSettings(gtx layout.Context) layout.Dimensions {
 			}
 		}
 	}
+	deleteIdx := -1
 	for i := range st.CustomThemeDelBtns {
-		for st.CustomThemeDelBtns[i].Clicked(gtx) {
-			if i < len(st.Draft.CustomThemes) {
-				deletedID := st.Draft.CustomThemes[i].ID
-				st.Draft.CustomThemes = append(st.Draft.CustomThemes[:i], st.Draft.CustomThemes[i+1:]...)
-				st.CustomThemeBtns = make([]widget.Clickable, len(st.Draft.CustomThemes))
-				st.CustomThemeDelBtns = make([]widget.Clickable, len(st.Draft.CustomThemes))
-				if st.Draft.Theme == deletedID {
-					st.Draft.Theme = "dark"
-				}
-				changed = true
-			}
+		if i >= len(st.CustomThemeDelBtns) {
+			break
 		}
+		if st.CustomThemeDelBtns[i].Clicked(gtx) {
+			deleteIdx = i
+			for st.CustomThemeDelBtns[i].Clicked(gtx) {
+			}
+			break
+		}
+	}
+	if deleteIdx >= 0 && deleteIdx < len(st.Draft.CustomThemes) {
+		deletedID := st.Draft.CustomThemes[deleteIdx].ID
+		st.Draft.CustomThemes = append(st.Draft.CustomThemes[:deleteIdx], st.Draft.CustomThemes[deleteIdx+1:]...)
+		st.CustomThemeBtns = make([]widget.Clickable, len(st.Draft.CustomThemes))
+		st.CustomThemeDelBtns = make([]widget.Clickable, len(st.Draft.CustomThemes))
+		if st.Draft.Theme == deletedID {
+			st.Draft.Theme = "dark"
+		}
+		changed = true
 	}
 	for st.NewThemeBtn.Clicked(gtx) {
 		st.NewThemeDialogOpen = !st.NewThemeDialogOpen
